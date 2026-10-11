@@ -126,7 +126,7 @@ def test_lomb_scargle_recovers_period():
 
 def test_lomb_scargle_inside_spark(spark):
     from cosmic.features import LS_SCHEMA, lomb_scargle_star
-    t = np.linspace(0, 300, 200)
+    t = np.sort(np.random.default_rng(3).uniform(0, 300, 200))  # irregular, like real AAVSO sampling
     pdf = pd.concat([pd.DataFrame({"auid": a, "jd": t, "mag_norm": np.sin(2 * np.pi * t / P)})
                      for a, P in [("A", 10.0), ("B", 50.0)]])
     p = dict(ls_min_points=20, ls_max_points=20000, ls_seed=1, ls_min_period_days=0.1,

@@ -16,7 +16,9 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 @pytest.fixture(scope="session")
 def spark():
-    os.environ.pop("SPARK_HOME", None)  # use pip PySpark's local mode, not the cluster's spark-defaults
+    # use pip PySpark's local mode and the local filesystem, not the cluster's configuration
+    for var in ("SPARK_HOME", "HADOOP_CONF_DIR", "YARN_CONF_DIR"):
+        os.environ.pop(var, None)
     from pyspark.sql import SparkSession
     s = (SparkSession.builder.master("local[2]").appName("cosmic-tests")
          .config("spark.sql.shuffle.partitions", "4")
@@ -46,7 +48,7 @@ def settings():
 def typed_view(spark, synth_dir):
     """Synthetic CSVs read exactly as Step 1 reads them, as temp view 'typed_obs'."""
     from cosmic.ingest import RAW_SCHEMA, TYPED_SELECT
-    spark.read.csv(os.path.join(synth_dir, "raw", "*.csv"), schema=RAW_SCHEMA, header=True,
+    spark.read.csv("file://" + os.path.join(synth_dir, "raw", "*.csv"), schema=RAW_SCHEMA, header=True,
                    quote='"', escape='"').createOrReplaceTempView("raw_csv")
     spark.sql(TYPED_SELECT).createOrReplaceTempView("typed_nopart")
     spark.sql("""SELECT *, CAST(year(timestamp_seconds(CAST((jd - 2440587.5) * 86400 AS BIGINT))) AS INT) AS obs_year,
