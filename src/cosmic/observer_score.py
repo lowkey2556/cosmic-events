@@ -125,8 +125,9 @@ def run(spark, cfg):
 
     q = pdf[~pdf["low_n"]].sort_values("score", ascending=False)
     cols = ["observer", "obs_type", "score", "sigma", "median_residual", "n_residuals", "n_obs", "n_stars"]
-    top = q.head(10)[cols].assign(group="top 10")
-    bottom = q.tail(10)[cols].iloc[::-1].assign(group="bottom 10")
+    k = min(10, len(q) // 2)  # never list the same observer in both groups
+    top = q.head(k)[cols].assign(group=f"top {k}")
+    bottom = q.tail(k)[cols].iloc[::-1].assign(group=f"bottom {k}")
     tb = pd.concat([top, bottom])
     print(tb.to_string(index=False))
     save_csv(tb, cfg, "observer_top_bottom10.csv")

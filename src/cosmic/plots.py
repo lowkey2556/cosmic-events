@@ -17,6 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
+from matplotlib.ticker import MaxNLocator, ScalarFormatter  # noqa: E402
 
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 OTHER = "#b8b7b1"
@@ -48,6 +49,9 @@ def bar_obs_per_star(pdf, out_dir):
     ax.set_xticks(range(len(pdf)))
     ax.set_xticklabels(pdf["name"], rotation=90, fontsize=7)
     ax.set_yscale("log")
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+    ax.yaxis.set_minor_formatter(ScalarFormatter())
+    ax.tick_params(axis="y", which="minor", labelsize=7)
     ax.set_ylabel("Observations (log scale)")
     ax.set_title("Observations per star")
     ax.grid(axis="x", visible=False)
@@ -75,7 +79,7 @@ def funnel(pdf, out_dir):
 
 def pruning(pdf, out_dir):
     """pdf: columns table, files_read, bytes_read."""
-    fig, axes = plt.subplots(1, 2, figsize=(7, 2.8))
+    fig, axes = plt.subplots(1, 2, figsize=(7, 3.1), constrained_layout=True)
     for ax, col, title in [(axes[0], "files_read", "Files scanned"), (axes[1], "bytes_read", "MB scanned")]:
         vals = pdf[col] / (1e6 if col == "bytes_read" else 1)
         ax.bar(pdf["table"], vals, color=[SERIES[0], OTHER], width=0.55)
@@ -127,6 +131,7 @@ def score_histogram(pdf, out_dir):
             edgecolor="white", linewidth=0.8)
     ax.set_xlabel("Observer agreement score  A_k  (1 = agrees perfectly with peers)")
     ax.set_ylabel("Observers")
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
     ax.set_title(f"Observer agreement scores (n = {len(pdf)} observers; low-n observers set to the median)")
     ax.legend(title="Dominant observation type")
     ax.grid(axis="x", visible=False)
@@ -152,9 +157,10 @@ def confusion(cm, title, out_dir, name):
 
 
 def confusion_side_by_side(cm_a, title_a, cm_b, title_b, out_dir, name):
-    fig, axes = plt.subplots(1, 2, figsize=(7, 3.2))
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3.4), constrained_layout=True)
     _cm_axes(axes[0], np.asarray(cm_a), title_a)
     _cm_axes(axes[1], np.asarray(cm_b), title_b)
+    axes[1].set_ylabel("")
     return _save(fig, out_dir, name)
 
 

@@ -79,4 +79,4 @@ kmeans:
 plots:
   dpi: 300
   lightcurve_star: null                        # null = auto-pick the star with the most observers
-  lightcurve_top_observers: 8
+  lightcurve_top_observers: 6
