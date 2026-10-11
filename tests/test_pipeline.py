@@ -25,6 +25,19 @@ def test_primary_type_and_labels():
     assert label_for("UGSS+E", lm) == 1
     assert label_for("M", lm) == 0
     assert label_for("NR+ELL", lm) is None
+    assert primary_type("RRAB/BL", [":", "+", "|", "/"]) == "RRAB"
+    assert primary_type("RRAB/BL") == "RRAB/BL"          # without '/', the default spec rule
+
+
+def test_vsx_name_candidates():
+    from cosmic.labels import vsx_name_candidates
+    assert vsx_name_candidates("SS CYG")[0] == "SS Cyg"
+    assert vsx_name_candidates("T CRB")[0] == "T CrB"
+    assert vsx_name_candidates("Z UMA")[0] == "Z UMa"
+    assert vsx_name_candidates("KHI CYG")[0] == "khi Cyg"
+    assert vsx_name_candidates("OMI CET")[0] == "omi Cet"
+    assert vsx_name_candidates("V603 AQL")[0] == "V0603 Aql"
+    assert vsx_name_candidates("V 603 Aql")[0] == "V0603 Aql"
 
 
 def test_sky_region():

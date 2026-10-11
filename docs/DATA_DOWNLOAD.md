@@ -58,7 +58,7 @@ For each star:
 5. **Include discrepant observations:** no, if the form offers this option.
 6. **Output format:** comma-separated (CSV) **with a header row**.
 
-Save each file as `NN_<name>.csv`, e.g. `01_SS_Cyg.csv`, `23_omi_Cet.csv`.
+Any file names work (the pipeline identifies stars by `auid`, not by file name), and one file may hold several stars. Overlapping files are fine: duplicates are removed in Step 2.
 
 **Check the header of the first file before downloading the rest.** It must be:
 

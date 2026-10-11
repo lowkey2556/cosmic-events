@@ -1,4 +1,8 @@
-# Per-star binary label from the VSX primary type (text before any ':', '+' or '|').
+# Per-star binary label from the VSX primary type (text before the first separator below).
 anomalous: [UG, UGSS, UGSU, UGZ, N, NA, NB, NL, ZAND, RCB, FUOR, UV, AM]
 normal:    [M, SRA, SRB, SR, EA, EB, EW, RRAB, RRC, DCEP, CEP, DSCT, BY]
 # unlisted -> excluded from supervised training, kept for K-Means
+# Separators that end the primary type. The original spec listed ':', '+' and '|'. '/' was added
+# because VSX also writes combined types with it (RRAB/BL, EA/SD, EW/KW, UGZ/IW, NL/VY, NA/DQ+UG).
+# Without '/', those stars would be unlabelled. Delete '/' to follow the original rule exactly.
+type_separators: [":", "+", "|", "/"]

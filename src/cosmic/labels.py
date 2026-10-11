@@ -23,22 +23,25 @@ import pandas as pd
 
 from .spark_session import save_hive_table
 
-_SPLIT = re.compile(r"[:+|]")
+DEFAULT_SEPARATORS = [":", "+", "|"]
+# IAU abbreviations whose VSX spelling is not simply Capitalised ("CRB" -> "CrB", "UMA" -> "UMa")
+_CON = {c.upper(): c for c in ["CMa", "CMi", "CVn", "CrA", "CrB", "LMi", "PsA", "TrA", "UMa", "UMi"]}
 
 
 def norm_name(name):
     return re.sub(r"\s+", " ", str(name)).strip().lower()
 
 
-def primary_type(vsx_type):
+def primary_type(vsx_type, separators=DEFAULT_SEPARATORS):
+    """Primary VSX type: the text before the first separator ("UGSS+E" -> "UGSS", "RRAB/BL" -> "RRAB")."""
     if vsx_type is None or (isinstance(vsx_type, float) and pd.isna(vsx_type)):
         return None
-    t = _SPLIT.split(str(vsx_type).strip())[0].strip().upper()
+    t = re.split("|".join(re.escape(c) for c in separators), str(vsx_type).strip())[0].strip().upper()
     return t or None
 
 
 def label_for(vsx_type, label_map):
-    p = primary_type(vsx_type)
+    p = primary_type(vsx_type, label_map.get("type_separators", DEFAULT_SEPARATORS))
     if p in set(label_map["anomalous"]):
         return 1
     if p in set(label_map["normal"]):
@@ -57,26 +60,59 @@ def sky_region(dec, edges):
     return "UNKNOWN"
 
 
+# AAVSO spells Greek letters in capitals ("KHI CYG", "OMI CET"); VizieR's VSX uses "khi Cyg", "omi Cet".
+_GREEK = {"ALF": "alf", "ALPHA": "alf", "BET": "bet", "BETA": "bet", "GAM": "gam", "DEL": "del", "EPS": "eps",
+          "ZET": "zet", "ETA": "eta", "THE": "the", "IOT": "iot", "KAP": "kap", "LAM": "lam", "MU": "mu.",
+          "MU.": "mu.", "NU": "nu.", "NU.": "nu.", "XI": "ksi", "KSI": "ksi", "OMI": "omi", "OMICRON": "omi",
+          "PI": "pi.", "PI.": "pi.", "RHO": "rho", "SIG": "sig", "TAU": "tau", "UPS": "ups", "PHI": "phi",
+          "KHI": "khi", "CHI": "khi", "PSI": "psi", "OME": "ome"}
+
+
+def vsx_name_candidates(name):
+    """VSX spellings to try for an AAVSO target name, most likely first.
+
+    "SS CYG" -> "SS Cyg"; "T CRB" -> "T CrB"; "KHI CYG" -> "khi Cyg"; "V603 AQL" -> "V0603 Aql"
+    (VSX pads V-numbers to four digits).
+    """
+    parts = re.sub(r"\s+", " ", str(name)).strip().split(" ")
+    out = []
+    if len(parts) >= 2 and len(parts[-1]) == 3 and parts[-1].isalpha():
+        con = _CON.get(parts[-1].upper(), parts[-1].capitalize())
+        des = "".join(parts[:-1]).upper()  # "V 603" -> "V603"
+        if des in _GREEK:
+            out.append(f"{_GREEK[des]} {con}")
+        m = re.fullmatch(r"V0*(\d+)", des)
+        if m:
+            out += [f"V{int(m.group(1)):04d} {con}", f"V{int(m.group(1))} {con}"]
+        out.append(f"{des} {con}")
+    out.append(" ".join(parts))
+    return list(dict.fromkeys(out))  # unique, order kept
+
+
 def fetch_vsx(names, pause_s=1.0):
-    """Query VizieR B/vsx for each name; returns rows name, ra, dec, type, queried_name."""
+    """Query VizieR B/vsx for each name (trying VSX spellings); returns queried_name, name, ra, dec, type."""
     from astroquery.vizier import Vizier
 
     v = Vizier(columns=["Name", "RAJ2000", "DEJ2000", "Type"], row_limit=5)
     rows = []
     for name in names:
-        try:
-            res = v.query_constraints(catalog="B/vsx/vsx", Name=f"={name}")
-        except Exception as exc:  # network errors are reported, not hidden
-            print(f"  VizieR query failed for {name!r}: {exc}")
-            res = None
-        if res and len(res[0]):
-            r = res[0][0]
-            rows.append(dict(queried_name=name, name=str(r["Name"]), ra=float(r["RAJ2000"]),
-                             dec=float(r["DEJ2000"]), type=str(r["Type"])))
-            print(f"  {name:12s} -> {r['Name']} {r['Type']}")
+        hit = None
+        for cand in vsx_name_candidates(name):
+            try:
+                res = v.query_constraints(catalog="B/vsx/vsx", Name=f"={cand}")
+            except Exception as exc:  # network errors are reported, not hidden
+                print(f"  VizieR query failed for {cand!r}: {exc}")
+                res = None
+            time.sleep(pause_s)
+            if res and len(res[0]):
+                hit = res[0][0]
+                break
+        if hit is not None:
+            rows.append(dict(queried_name=name, name=str(hit["Name"]), ra=float(hit["RAJ2000"]),
+                             dec=float(hit["DEJ2000"]), type=str(hit["Type"])))
+            print(f"  {name:12s} -> {hit['Name']:12s} {hit['Type']}")
         else:
-            print(f"  {name:12s} -> NOT FOUND in VSX")
-        time.sleep(pause_s)
+            print(f"  {name:12s} -> NOT FOUND in VSX (tried {vsx_name_candidates(name)})")
     return pd.DataFrame(rows, columns=["queried_name", "name", "ra", "dec", "type"])
 
 
@@ -106,11 +142,7 @@ def build_labels(spark, cfg, raw_hdfs_glob):
     else:
         if cfg.dataset != "real":
             raise FileNotFoundError(cfg.labels_file)
-        star_list = cfg.load_yaml("star_list")
-        listed = [s["name"] for grp in ("eruptive", "periodic") for s in star_list[grp]]
-        by_norm = {norm_name(n): n for n in listed}
-        queries = pd.DataFrame({"auid": data_stars["auid"],
-                                "queried_name": [by_norm.get(norm_name(t), t) for t in data_stars["data_name"]]})
+        queries = pd.DataFrame({"auid": data_stars["auid"], "queried_name": data_stars["data_name"]})
         print(f"Fetching {len(queries)} stars from VizieR B/vsx (1 s between requests)")
         vsx = queries.merge(fetch_vsx(list(queries["queried_name"])), on="queried_name", how="inner")
         os.makedirs(os.path.dirname(cfg.labels_file), exist_ok=True)
@@ -122,7 +154,8 @@ def build_labels(spark, cfg, raw_hdfs_glob):
         vsx["auid"] = vsx["name"].map(lambda n: m.get(norm_name(n)))
 
     out = data_stars.merge(vsx[["auid", "name", "ra", "dec", "type"]], on="auid", how="left")
-    out["primary_type"] = out["type"].map(primary_type)
+    seps = label_map.get("type_separators", DEFAULT_SEPARATORS)
+    out["primary_type"] = out["type"].map(lambda t: primary_type(t, seps))
     out["label"] = out["type"].map(lambda t: label_for(t, label_map)).astype("Int64")
     out["sky_region"] = out["dec"].map(lambda d: sky_region(d, edges))
     out = out.rename(columns={"type": "vsx_type"})[
