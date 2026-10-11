@@ -22,7 +22,7 @@ Run top to bottom with **Runtime → Run all**. Outputs are written to `MyDrive/
     ("md", "## 0. Mount Google Drive and get the code"),
     ("code", """from google.colab import drive
 drive.mount('/content/drive')"""),
-    ("code", """REPO_URL = "https://github.com/CHANGE-ME/cosmic-events.git"   # <-- your GitHub repository
+    ("code", """REPO_URL = "https://github.com/lowkey2556/cosmic-events.git"
 import os
 if not os.path.isdir('/content/cosmic/.git'):
     !git clone -q $REPO_URL /content/cosmic
