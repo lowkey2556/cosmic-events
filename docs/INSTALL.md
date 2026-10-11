@@ -62,6 +62,26 @@ bash setup/smoke_tests.sh 5   # PySpark on YARN writes smoke.spark_written; Hive
 python run.py milestone1 --data real
 ```
 
+## Problems found while testing, and how the scripts handle them
+
+| Symptom | Cause | Fix in the scripts |
+|---|---|---|
+| HDFS and YARN daemons die as soon as the cell or shell that started them ends (log: `RECEIVED SIGNAL 1: SIGHUP`) | Hadoop daemons install their own SIGHUP handler, which overrides `nohup` | `start_stack.sh` launches every daemon with `setsid` (its own session, no controlling terminal) |
+| `start_stack.sh` never returns when its output is piped (a Colab cell would hang) | `(cd X && java ... &)` backgrounds the whole list, leaving a shell holding stdout | `(cd X; setsid java ... </dev/null >log 2>&1 &)` |
+| `toPandas()` fails with `No module named 'distutils'` | PySpark 3.5 imports `distutils`, which Python 3.12 removed | `setuptools` in requirements.txt provides the shim |
+| PySpark/pandas errors with pandas 3.x | PySpark 3.5 predates pandas 3 | `pandas>=2.0,<3` (Colab ships 2.2) |
+| Hive `SELECT ... ORDER BY` hangs on a small machine | Hive launches a MapReduce job; its 1.5 GB ApplicationMaster left no room for a map container | MapReduce AM/map/reduce containers set to 512 MB in `mapred-site.xml`; smoke test 5 uses a plain `SELECT` (a fetch task, no MapReduce) |
+
+## Verified
+
+On 2026-10-11, on the WSL test machine (non-root, 3.7 GB RAM, YARN 2 GB), these were verified:
+- `install_stack.sh` and `start_stack.sh` completed; the start took about 1 minute.
+- Smoke tests 1–5 all passed.
+- `pytest` passed 11 of 11 tests.
+- `python run.py milestone1 --data synthetic` ran all six steps on YARN, with every table readable from the Hive CLI.
+
+None of this used real data, and none of it produced Review 2 outputs.
+
 ## After a Colab reset
 
 The VM is wiped, but Drive keeps the tarball cache and all outputs. Re-run the notebook from

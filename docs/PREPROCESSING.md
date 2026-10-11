@@ -13,7 +13,7 @@ are logged (Hive table `preprocess_log`, file `preprocess_row_counts.csv`).
 | Add `obs_year` (from the Julian Date) and `sky_region` (declination band from VSX; `UNKNOWN` if missing) | **Spark SQL** | These become the partition columns |
 | Write **Parquet + Snappy**, partitioned by `obs_year` / `sky_region` | **Spark → HDFS** | Columnar and compressed, so a query reads only the columns and folders it needs |
 | Register the **external** Hive table `observations_raw` on that HDFS folder (`MSCK REPAIR TABLE` discovers the partitions) | **Hive metastore** | Every teammate, Spark and the Hive CLI see one named table. "External" means dropping the table never deletes the data. |
-| Run the same year-restricted query on the partitioned table and on an unpartitioned copy (`observations_flat`), reading the **files and bytes actually scanned** from Spark's query metrics | **Spark SQL** | Evidence that partition pruning skips whole folders |
+| Run the same year-restricted query on the partitioned table and on an unpartitioned copy (`observations_flat`), reading the **files and bytes actually scanned** from Spark's query metrics | **Spark SQL** | Evidence that partition pruning skips whole folders. **Bytes scanned** is the meaningful number. *Files* scanned can be higher for the partitioned table, because each partition folder holds its own small file, while the unpartitioned copy has a few large ones. We report both as measured. |
 
 ## Step 2: Preprocessing, all in Spark SQL (owner: Sanjhana)
 

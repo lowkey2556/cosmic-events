@@ -32,7 +32,7 @@ spark:
   executor_cores: 1
   executor_memory: 1536m
   executor_memory_overhead: 512m
-  shuffle_partitions: 16
+  shuffle_partitions: 48                     # real data: the observer self-join is the largest shuffle
   metastore_uri: thrift://localhost:9083
   metastore_version: 3.1.3
   warehouse_dir: /user/hive/warehouse
