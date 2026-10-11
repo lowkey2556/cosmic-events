@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 @pytest.fixture(scope="session")
 def spark():
+    os.environ.pop("SPARK_HOME", None)  # use pip PySpark's local mode, not the cluster's spark-defaults
     from pyspark.sql import SparkSession
     s = (SparkSession.builder.master("local[2]").appName("cosmic-tests")
          .config("spark.sql.shuffle.partitions", "4")

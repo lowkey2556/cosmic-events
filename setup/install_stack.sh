@@ -149,6 +149,13 @@ cat > "$HC/mapred-site.xml" <<EOF
   <property><name>yarn.app.mapreduce.am.env</name><value>HADOOP_MAPRED_HOME=$HADOOP_HOME</value></property>
   <property><name>mapreduce.map.env</name><value>HADOOP_MAPRED_HOME=$HADOOP_HOME</value></property>
   <property><name>mapreduce.reduce.env</name><value>HADOOP_MAPRED_HOME=$HADOOP_HOME</value></property>
+  <!-- small containers so Hive's occasional MapReduce jobs fit beside Spark on one VM -->
+  <property><name>yarn.app.mapreduce.am.resource.mb</name><value>512</value></property>
+  <property><name>yarn.app.mapreduce.am.command-opts</name><value>-Xmx400m</value></property>
+  <property><name>mapreduce.map.memory.mb</name><value>512</value></property>
+  <property><name>mapreduce.map.java.opts</name><value>-Xmx400m</value></property>
+  <property><name>mapreduce.reduce.memory.mb</name><value>512</value></property>
+  <property><name>mapreduce.reduce.java.opts</name><value>-Xmx400m</value></property>
 </configuration>
 EOF
 # Colab runs as root: Hadoop 3 refuses to start daemons as root unless these are set.
@@ -225,7 +232,6 @@ export STACK_HOME=$STACK_HOME
 export JAVA_HOME=$JAVA_HOME
 export HADOOP_HOME=$HADOOP_HOME
 export HADOOP_CONF_DIR=$HC
-export YARN_CONF_DIR=$HC
 export HADOOP_MAPRED_HOME=$HADOOP_HOME
 export SPARK_HOME=$SPARK_HOME
 export HIVE_HOME=$HIVE_HOME

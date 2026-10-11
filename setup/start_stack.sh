@@ -16,13 +16,17 @@ wait_port() {  # wait_port <port> <name> <seconds>
   echo "ERROR: $2 did not open port $1 in $3 s. Logs: $LOG"; return 1
 }
 running() { jps 2>/dev/null | awk '{print $2}' | grep -qx "$1"; }
+# Hadoop daemons install their own SIGHUP handler (overriding nohup), so they would die when the
+# launching shell's terminal closes, e.g. at the end of a Colab "!" cell. setsid gives each daemon
+# its own session with no controlling terminal, so no SIGHUP ever reaches it.
+detach() { setsid "$@" </dev/null; }
 
 echo "== HDFS"
 if [ ! -d "$COSMIC_DATA_DIR/namenode/current" ]; then
   hdfs namenode -format -nonInteractive -force >"$LOG/format.log" 2>&1 && echo "   NameNode formatted"
 fi
-running NameNode || hdfs --daemon start namenode
-running DataNode || hdfs --daemon start datanode
+running NameNode || detach hdfs --daemon start namenode
+running DataNode || detach hdfs --daemon start datanode
 wait_port 9000 NameNode 60
 hdfs dfsadmin -safemode wait >/dev/null
 hdfs dfs -mkdir -p /tmp /tmp/hive /user/hive/warehouse /spark "/user/$(whoami)"
@@ -30,8 +34,8 @@ hdfs dfs -chmod -R 1777 /tmp
 hdfs dfs -chmod -R 777 /user/hive/warehouse
 
 echo "== YARN"
-running ResourceManager || yarn --daemon start resourcemanager
-running NodeManager || yarn --daemon start nodemanager
+running ResourceManager || detach yarn --daemon start resourcemanager
+running NodeManager || detach yarn --daemon start nodemanager
 wait_port 8088 ResourceManager 60
 
 echo "== Spark jars archive on HDFS (avoids re-uploading ~250 MB on every submit)"
@@ -42,9 +46,11 @@ fi
 
 echo "== Derby network server (Hive metastore database)"
 if ! port_open 1527; then
-  (cd "$COSMIC_DATA_DIR/derby" && nohup "$JAVA_HOME/bin/java" -Xmx256m -Dderby.system.home="$COSMIC_DATA_DIR/derby" \
+  # "cd ...;" (not "&&") so only the java process is backgrounded and no shell keeps our stdout open
+  (cd "$COSMIC_DATA_DIR/derby"; setsid nohup "$JAVA_HOME/bin/java" -Xmx256m -Dderby.system.home="$COSMIC_DATA_DIR/derby" \
      -cp "$DERBY_HOME/lib/derby.jar:$DERBY_HOME/lib/derbynet.jar:$DERBY_HOME/lib/derbytools.jar" \
-     org.apache.derby.drda.NetworkServerControl start -h 127.0.0.1 -p 1527 -noSecurityManager >"$LOG/derby.log" 2>&1 &)
+     org.apache.derby.drda.NetworkServerControl start -h 127.0.0.1 -p 1527 -noSecurityManager \
+     </dev/null >"$LOG/derby.log" 2>&1 &)
 fi
 wait_port 1527 Derby 60
 
@@ -61,7 +67,7 @@ fi
 
 echo "== Hive metastore service"
 if ! port_open 9083; then
-  (cd "$LOG" && nohup hive --service metastore >"$LOG/metastore.log" 2>&1 &)
+  (cd "$LOG"; setsid nohup hive --service metastore </dev/null >"$LOG/metastore.log" 2>&1 &)
 fi
 wait_port 9083 "Hive metastore" 180
 

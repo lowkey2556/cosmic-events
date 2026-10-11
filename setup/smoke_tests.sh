@@ -51,7 +51,7 @@ t4() {
 
 t5() {
   "$PYSPARK_PYTHON" "$REPO_DIR/setup/smoke_spark_hive.py" || fail 5 "PySpark could not write the Hive table"
-  hive -S -e "SELECT * FROM smoke.spark_written ORDER BY id;" 2>"$TMP/hive5.err" | tee "$TMP/hive5.out"
+  hive -S -e "SELECT * FROM smoke.spark_written;" 2>"$TMP/hive5.err" | tee "$TMP/hive5.out"
   grep -q "written-by-pyspark" "$TMP/hive5.out" && pass 5 "table written by PySpark on YARN read back through the Hive CLI" \
     || { tail -30 "$TMP/hive5.err"; fail 5 "Hive could not read the PySpark table"; }
 }
