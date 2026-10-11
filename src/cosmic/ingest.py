@@ -63,6 +63,13 @@ OBS_DDL_COLUMNS = """row_num BIGINT, target STRING, auid STRING, jd DOUBLE, mag 
   comments STRING, source_file STRING"""
 
 
+def read_raw(spark, raw_glob):
+    """Read AAVSO CSVs with the explicit all-text schema. multiLine keeps a quoted comment that
+    contains a line break inside its own record (real exports contain such comments)."""
+    return spark.read.csv(raw_glob, schema=RAW_SCHEMA, header=True, quote='"', escape='"',
+                          multiLine=True, mode="PERMISSIVE")
+
+
 def put_raw_files(cfg):
     files = sorted(glob.glob(os.path.join(cfg.raw_dir, "*.csv")))
     if not files:
@@ -168,8 +175,7 @@ def run(spark, cfg):
     check_header(spark, raw_glob)
     build_labels(spark, cfg, raw_glob)
 
-    spark.read.csv(raw_glob, schema=RAW_SCHEMA, header=True, quote='"', escape='"', mode="PERMISSIVE") \
-        .createOrReplaceTempView("raw_csv")
+    read_raw(spark, raw_glob).createOrReplaceTempView("raw_csv")
     edges = cfg.section("ingest")["dec_band_edges"]
     typed = spark.sql(TYPED_SELECT)
     typed.createOrReplaceTempView("typed")

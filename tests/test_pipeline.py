@@ -64,6 +64,16 @@ def test_header_and_blank_values(spark, typed_view):
     assert r.spellings > r.stars     # same star, several spellings: we must group on auid
 
 
+def test_comment_with_line_break_stays_one_record(spark, tmp_path):
+    from cosmic.ingest import RAW_COLUMNS, read_raw
+    f = tmp_path / "x.csv"
+    f.write_text(",".join(RAW_COLUMNS) + "\n"
+                 + '1,T CrB,000-BBW-825,2460702.946285,10.1,0.01,False,V,CCD,SCMA,,,,,,,,,"line one\r\nline two"\n'
+                 + "2,T CrB,000-BBW-825,2460702.95,10.2,0.01,False,V,CCD,SCMA,,,,,,,,,\n", newline="")
+    rows = read_raw(spark, "file://" + str(f)).collect()
+    assert len(rows) == 2 and rows[0]["comments"].startswith("line one") and rows[1]["jd"] == "2460702.95"
+
+
 # ---------------------------------------------------------------- preprocessing
 def test_preprocessing_counts_and_normalisation(spark, clean_views, typed_view):
     log = clean_views["log"]

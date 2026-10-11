@@ -47,9 +47,8 @@ def settings():
 @pytest.fixture(scope="session")
 def typed_view(spark, synth_dir):
     """Synthetic CSVs read exactly as Step 1 reads them, as temp view 'typed_obs'."""
-    from cosmic.ingest import RAW_SCHEMA, TYPED_SELECT
-    spark.read.csv("file://" + os.path.join(synth_dir, "raw", "*.csv"), schema=RAW_SCHEMA, header=True,
-                   quote='"', escape='"').createOrReplaceTempView("raw_csv")
+    from cosmic.ingest import TYPED_SELECT, read_raw
+    read_raw(spark, "file://" + os.path.join(synth_dir, "raw", "*.csv")).createOrReplaceTempView("raw_csv")
     spark.sql(TYPED_SELECT).createOrReplaceTempView("typed_nopart")
     spark.sql("""SELECT *, CAST(year(timestamp_seconds(CAST((jd - 2440587.5) * 86400 AS BIGINT))) AS INT) AS obs_year,
                         'UNKNOWN' AS sky_region FROM typed_nopart""").createOrReplaceTempView("typed_obs")

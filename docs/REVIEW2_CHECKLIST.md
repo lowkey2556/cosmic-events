@@ -37,7 +37,7 @@ through Hive.
 ## Honest status of the Milestone 1 results
 
 - The classification results use **one fixed seed (42) on a small test set** (about 30% of the
-  labelled stars, roughly 12 stars). A single star moves recall or precision by several points.
+  labelled stars: 10 stars, 5 of them anomalous). A single star moves recall by 20 points.
   They are **preliminary** and must be presented that way.
 - **Milestone 2** adds the 5-seed robustness (mean ± std), model interpretation (feature
   importances, `toDebugString`, whether observer features are used in splits), error analysis,

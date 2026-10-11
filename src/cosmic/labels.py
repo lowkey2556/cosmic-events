@@ -118,7 +118,8 @@ def fetch_vsx(names, pause_s=1.0):
 
 def stars_in_data(spark, raw_hdfs_glob):
     """auid -> most frequent target spelling, computed in Spark on the raw files."""
-    df = spark.read.option("header", True).csv(raw_hdfs_glob).select("auid", "target")
+    from .ingest import read_raw  # same reader as Step 1 (multi-line safe)
+    df = read_raw(spark, raw_hdfs_glob).select("auid", "target")
     df.createOrReplaceTempView("raw_names")
     return spark.sql("""
         SELECT auid, target AS data_name, n FROM (

@@ -71,6 +71,6 @@ Plain accuracy is deliberately not headlined.
 
 ## Honesty about Milestone 1
 
-Milestone 1 runs **one fixed seed** (42) on a test set of only about 12 stars, so one star
-changes recall by about 8 points. These results are **preliminary**. Milestone 2 repeats
+Milestone 1 runs **one fixed seed** (42) on a test set of only 10 stars (5 anomalous), so one
+star changes recall by 20 points. These results are **preliminary**. Milestone 2 repeats
 everything over 5 seeds and reports mean ± std.
