@@ -1,0 +1,4 @@
+# Per-star binary label from the VSX primary type (text before any ':', '+' or '|').
+anomalous: [UG, UGSS, UGSU, UGZ, N, NA, NB, NL, ZAND, RCB, FUOR, UV, AM]
+normal:    [M, SRA, SRB, SR, EA, EB, EW, RRAB, RRC, DCEP, CEP, DSCT, BY]
+# unlisted -> excluded from supervised training, kept for K-Means

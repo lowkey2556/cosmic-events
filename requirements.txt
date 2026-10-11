@@ -1,0 +1,10 @@
+# pyspark is pinned to exactly match the Spark 3.5.9 tarball installed by setup/install_stack.sh
+pyspark==3.5.9
+pyyaml
+pytest
+numpy
+pandas
+pyarrow
+matplotlib
+astropy
+astroquery

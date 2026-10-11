@@ -1,0 +1,52 @@
+# Fixed, balanced star list for the AAVSO downloads (44 stars).
+# expected_type is only a guide; the label actually used comes from VSX at run time.
+# Suggested date range for every file: 2021-01-01 to 2023-12-31 (JD 2459215.5 - 2460310.5).
+date_range: {start: "2021-01-01", end: "2023-12-31"}
+
+eruptive:
+  - {n: 1,  name: SS Cyg,   expected_type: UGSS}
+  - {n: 2,  name: U Gem,    expected_type: UGSS}
+  - {n: 3,  name: Z Cam,    expected_type: UGZ}
+  - {n: 4,  name: RU Peg,   expected_type: UGSS}
+  - {n: 5,  name: T CrB,    expected_type: NR (not in label map -> unlabelled, K-Means only)}
+  - {n: 6,  name: SU UMa,   expected_type: UGSU}
+  - {n: 7,  name: AM Her,   expected_type: AM}
+  - {n: 8,  name: YZ Cnc,   expected_type: UGSU}
+  - {n: 9,  name: CH Cyg,   expected_type: ZAND}
+  - {n: 10, name: R CrB,    expected_type: RCB}
+  - {n: 11, name: VW Hyi,   expected_type: UGSU}
+  - {n: 12, name: AH Her,   expected_type: UGZ}
+  - {n: 13, name: EX Dra,   expected_type: UGSS}
+  - {n: 14, name: RX And,   expected_type: UGZ}
+  - {n: 15, name: SY Cnc,   expected_type: UGZ}
+  - {n: 16, name: BZ UMa,   expected_type: UGSU}
+  - {n: 17, name: V1504 Cyg, expected_type: UGSU}
+  - {n: 18, name: T Leo,    expected_type: UGSU}
+  - {n: 19, name: AB Dra,   expected_type: UGZ}
+  - {n: 20, name: TT Ari,   expected_type: NL}
+  - {n: 21, name: Z And,    expected_type: ZAND}
+  - {n: 22, name: AG Dra,   expected_type: ZAND}
+
+periodic:
+  - {n: 23, name: omi Cet,  expected_type: M}
+  - {n: 24, name: chi Cyg,  expected_type: M}
+  - {n: 25, name: R Leo,    expected_type: M}
+  - {n: 26, name: R Hya,    expected_type: M}
+  - {n: 27, name: bet Per,  expected_type: EA}
+  - {n: 28, name: RR Lyr,   expected_type: RRAB}
+  - {n: 29, name: del Cep,  expected_type: DCEP}
+  - {n: 30, name: eta Aql,  expected_type: DCEP}
+  - {n: 31, name: W UMa,    expected_type: EW}
+  - {n: 32, name: R Cas,    expected_type: M}
+  - {n: 33, name: R Aql,    expected_type: M}
+  - {n: 34, name: U Ori,    expected_type: M}
+  - {n: 35, name: T Cep,    expected_type: M}
+  - {n: 36, name: R Cyg,    expected_type: M}
+  - {n: 37, name: R Ser,    expected_type: M}
+  - {n: 38, name: R UMa,    expected_type: M}
+  - {n: 39, name: U Her,    expected_type: M}
+  - {n: 40, name: SS Vir,   expected_type: SRA}
+  - {n: 41, name: W Hya,    expected_type: SRA}
+  - {n: 42, name: RX Boo,   expected_type: SRB}
+  - {n: 43, name: g Her,    expected_type: SRB}
+  - {n: 44, name: Z UMa,    expected_type: SRB}

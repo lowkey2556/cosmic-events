@@ -1,0 +1,82 @@
+# All paths and parameters for the Cosmic Event pipeline.
+# Any value can be overridden on the command line:  python run.py <step> --set spark.executor_memory=512m
+
+# Two datasets live side by side and never mix: different HDFS base, Hive database and output folder.
+datasets:
+  real:
+    root: /content/drive/MyDrive/cosmic        # Google Drive folder (raw/ and labels/ live here)
+    hdfs_base: /cosmic
+    database: cosmic
+    output_subdir: review2                     # Review 2 deliverables (real data only)
+  synthetic:
+    root: data/synthetic                       # relative to the repo; created by scripts/make_synthetic.py
+    hdfs_base: /cosmic_synth
+    database: cosmic_synth
+    output_subdir: synthetic_run               # NEVER review2
+
+paths:
+  raw_subdir: raw                              # <root>/raw/*.csv  (AAVSO exports)
+  labels_file: labels/vsx_labels.csv           # <root>/labels/vsx_labels.csv (VSX rows for our stars)
+  star_list: config/stars.yaml
+  label_map: config/label_map.yaml
+
+hdfs:
+  namenode: hdfs://localhost:9000
+
+spark:
+  master: yarn
+  app_name: cosmic-events
+  deploy_mode: client
+  driver_memory: 2g
+  executor_instances: 2
+  executor_cores: 1
+  executor_memory: 2g
+  executor_memory_overhead: 768m
+  shuffle_partitions: 16
+  metastore_uri: thrift://localhost:9083
+  metastore_version: 3.1.3
+  warehouse_dir: /user/hive/warehouse
+
+ingest:
+  # Declination bands (degrees) used for the sky_region partition column.
+  dec_band_edges: [-90, -30, 0, 30, 60, 90]
+  pruning_test_year: null                      # null = the year with the most rows
+
+preprocess:
+  # AAVSO comment codes that mark an observation as unreliable (any letter present -> dropped).
+  # B sky bright, U clouds, W poor seeing, L low in sky, Z questionable accuracy, I identification uncertain, S comp-sequence problem
+  unreliable_comment_codes: [B, U, W, L, Z, I, S]
+  # Dense CCD time series: keep at most this many points per (star, band, observer, night), evenly spaced.
+  max_obs_per_observer_night: 10
+  min_group_size: 20                           # (star, band) groups smaller than this are dropped
+
+observer_score:
+  window_days: 1.0                             # Δt for the leave-one-out consensus
+  min_residuals: 20                            # observers with fewer residuals get the population median score
+  mad_scale: 1.4826
+
+features:
+  ls_min_points: 20                            # fewer detections than this -> Lomb-Scargle features imputed
+  ls_min_period_days: 0.1
+  ls_max_period_days: 1000.0
+  ls_samples_per_peak: 5
+  ls_max_points: 20000                         # random subsample cap per star (fixed seed) to bound cost
+  ls_seed: 7
+
+classify:
+  train_fraction: 0.7
+  seed: 42
+  dt_max_depths: [3, 5]
+  cv_folds: 3
+  rf_num_trees: 100
+  lr_reg_param: 0.01
+
+kmeans:
+  k_min: 2
+  k_max: 8
+  seed: 42
+
+plots:
+  dpi: 300
+  lightcurve_star: null                        # null = auto-pick the star with the most observers
+  lightcurve_top_observers: 8
