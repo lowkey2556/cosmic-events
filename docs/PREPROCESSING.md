@@ -1,0 +1,71 @@
+# Big Data processing steps, in plain English
+
+*(Review 2, slide 4.)* Each step names the tool it uses and why. Row counts after every step
+are logged (Hive table `preprocess_log`, file `preprocess_row_counts.csv`).
+
+## Step 1: Ingestion and storage (owner: Idhazhya)
+
+| What | Tool | Why |
+|---|---|---|
+| Copy the raw AAVSO CSV exports from Google Drive into HDFS `/cosmic/raw/` with `hdfs dfs -put` | **Hadoop HDFS** | Distributed, fault-tolerant storage. Every later step reads from the cluster, not from a laptop folder. |
+| Fetch each star's VSX type and coordinates (only the stars in our files) | astroquery → VizieR `B/vsx`; saved as Hive table `star_labels` | Gives the ground-truth class and the sky position |
+| Read the CSVs with an **explicit schema** (every column named; read as text, then cast) | **Spark** | Blank uncertainties and `NA` comparison stars become nulls instead of crashing the job |
+| Add `obs_year` (from the Julian Date) and `sky_region` (declination band from VSX; `UNKNOWN` if missing) | **Spark SQL** | These become the partition columns |
+| Write **Parquet + Snappy**, partitioned by `obs_year` / `sky_region` | **Spark → HDFS** | Columnar and compressed, so a query reads only the columns and folders it needs |
+| Register the **external** Hive table `observations_raw` on that HDFS folder (`MSCK REPAIR TABLE` discovers the partitions) | **Hive metastore** | Every teammate, Spark and the Hive CLI see one named table. "External" means dropping the table never deletes the data. |
+| Run the same year-restricted query on the partitioned table and on an unpartitioned copy (`observations_flat`), reading the **files and bytes actually scanned** from Spark's query metrics | **Spark SQL** | Evidence that partition pruning skips whole folders |
+
+## Step 2: Preprocessing, all in Spark SQL (owner: Sanjhana)
+
+1. **Deduplicate** on `(auid, jd, band, observer, mag)`. The same report submitted twice would
+   otherwise count double. We use `ROW_NUMBER()` over that key and keep the first.
+2. **Drop rows with null keys** (`auid`, `jd`, `band`, `observer`, `mag`). Without these, an
+   observation can't be placed or compared.
+3. **Drop unreliable comment codes.** If the AAVSO comment code contains any of
+   `B U W L Z I S` (bright sky, clouds, poor seeing, low altitude, questionable accuracy,
+   uncertain identification, comparison-sequence problem), the row is dropped. The list is set
+   in `settings.yaml`.
+4. **Split out "fainter-than" rows** (`fainterthan = TRUE`). The star was *not* seen; the
+   magnitude is only an upper limit, so these rows are excluded from all magnitude statistics.
+   They go to `obs_upper_limits` and still count toward observing cadence (gaps, time span) in
+   Step 4.
+5. **Thin dense time series.** Keep at most 10 points per (star, band, observer, night), evenly
+   spaced. Without this, one CCD observer's 500-point night would dominate both the consensus and
+   the residual counts, and would make the self-join quadratic.
+6. **Band normalisation.** `mag_norm = mag − median(mag)` within each `(auid, band)`. V, B and
+   visual magnitudes of the same star sit at different levels. Subtracting each band's median
+   puts all bands on a common zero point, so we can compare observers and measure amplitude.
+   `(auid, band)` groups with fewer than 20 rows are dropped because their median is unstable.
+
+Output: Hive table `obs_clean` (one row per usable detection, with `mag_norm` and a unique
+`obs_id`).
+
+## Step 3: Observer agreement score (owner: Sanjhana)
+
+See [PROPOSED_MODEL.md](PROPOSED_MODEL.md). This is a **Spark SQL self-join** of `obs_clean`
+with itself on `(auid, band)`, restricted to `|Δt| ≤ 1 day` and different observers. To keep
+the join small, each row gets a day bucket `floor(jd / Δt)` and is joined only with the three
+neighbouring buckets (a fast equi-join). The exact `|Δt|` test is then applied. Medians and
+MADs are computed with Spark SQL `percentile`. Outputs: Hive tables `observer_residuals` and
+`observer_scores`.
+
+## Step 4: Features (owner: Rojashree)
+
+One row per star, built with Spark SQL aggregates. The Lomb–Scargle periodogram (astropy) runs
+**per star inside Spark** with `groupBy("auid").applyInPandas(...)`, so it is parallel across
+stars and the full dataset is never collected to the driver. Output: Hive table `star_features`.
+
+## Step 5: Classification (owner: Rojashree)
+
+See [CLASSIFICATION.md](CLASSIFICATION.md).
+
+## Step 6: K-Means (owner: Lok)
+
+All stars, including unlabelled ones, are clustered with **Spark MLlib K-Means** on the
+standardised baseline features. k = 2..8 is chosen by silhouette score. The clusters are
+cross-tabulated against the labels.
+
+## Why "never group on `target`"
+
+The same star appears as "SS Cyg" and "SS CYG", for example. Every grouping and join uses
+`auid`, the AAVSO's unique star identifier.

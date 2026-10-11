@@ -97,7 +97,7 @@ YARN_MB=$(( (MEM_MB * 55 / 100) / 256 * 256 ))
 [ "$YARN_MB" -lt 1536 ] && YARN_MB=1536
 # vcores are a scheduling unit, not physical cores; allow 4+ so the 1/2/4-executor runs can be scheduled.
 YARN_VCORES=$(( NPROC * 2 )); [ "$YARN_VCORES" -lt 4 ] && YARN_VCORES=4
-if [ "$MEM_MB" -lt 6000 ]; then DAEMON_HEAP=256m; else DAEMON_HEAP=1024m; fi
+if [ "$MEM_MB" -lt 6000 ]; then DAEMON_HEAP=256m; else DAEMON_HEAP=512m; fi
 echo "== Machine: ${MEM_MB} MB RAM, ${NPROC} CPUs -> YARN ${YARN_MB} MB, ${YARN_VCORES} vcores, daemon heap ${DAEMON_HEAP}"
 
 DATA_DIR="$STACK_HOME/data"

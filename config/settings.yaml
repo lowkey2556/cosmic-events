@@ -30,8 +30,8 @@ spark:
   driver_memory: 2g
   executor_instances: 2
   executor_cores: 1
-  executor_memory: 2g
-  executor_memory_overhead: 768m
+  executor_memory: 1536m
+  executor_memory_overhead: 512m
   shuffle_partitions: 16
   metastore_uri: thrift://localhost:9083
   metastore_version: 3.1.3
