@@ -95,11 +95,16 @@ def bar_obs_per_star(pdf, out_dir):
 
 
 def funnel(pdf, out_dir):
-    """pdf: columns step, rows (ordered) — rows remaining after each cleaning step."""
-    fig = go.Figure(go.Bar(x=pdf["rows"], y=pdf["step"], orientation="h", marker_color=SERIES[0],
-                           text=[f"{v:,}" for v in pdf["rows"]], textposition="outside", cliponaxis=False))
+    """pdf: columns step, rows (ordered), optional pct_removed_by_step — rows remaining after each step.
+    The thinning step is drawn in a second colour so it stands out as its own step."""
+    pct = pdf["pct_removed_by_step"] if "pct_removed_by_step" in pdf else pd.Series([0.0] * len(pdf))
+    text = [f"{v:,}" + (f"  (−{p:.1f}%)" if i and p > 0 else "") for i, (v, p) in enumerate(zip(pdf["rows"], pct))]
+    colours = [SERIES[1] if "thinning" in s else SERIES[0] for s in pdf["step"]]
+    fig = go.Figure(go.Bar(x=pdf["rows"], y=pdf["step"], orientation="h", marker_color=colours,
+                           text=text, textposition="outside", cliponaxis=False))
     fig.update_yaxes(autorange="reversed", showgrid=False, automargin=True)
-    fig.update_xaxes(title="Rows remaining", range=[0, pdf["rows"].max() * 1.2], showgrid=True)
+    fig.update_xaxes(title="Rows remaining (in brackets: % removed by that step)",
+                     range=[0, pdf["rows"].max() * 1.35], showgrid=True)
     fig.update_layout(title="Preprocessing: rows after each step")
     return save(fig, out_dir, "fig_preprocessing_funnel", height=max(550, 80 * len(pdf) + 220))
 
@@ -194,14 +199,15 @@ def confusion_side_by_side(cm_a, title_a, cm_b, title_b, out_dir, name):
 
 def grouped_metrics(pdf, out_dir, metrics=("precision", "recall", "f1", "balanced_accuracy"),
                     title="Existing observer-agnostic classifiers vs observer-aware models (one seed)",
-                    name="fig_model_comparison", std=None):
-    """pdf: column model + one column per metric. Optional std (same columns): drawn as error bars."""
+                    name="fig_model_comparison", std=None, labels=None):
+    """pdf: column model + one column per metric. Optional std (same columns): drawn as error bars.
+    labels: optional display name per metric (e.g. {"roc_auc": "ROC-AUC"})."""
     fig = go.Figure()
     for i, m in enumerate(metrics):
         err = None if std is None else dict(type="data", array=std[m].fillna(0), visible=True, thickness=1.5, width=5)
-        fig.add_bar(x=pdf["model"], y=pdf[m].fillna(0), name=m.replace("_", " "),
+        fig.add_bar(x=pdf["model"], y=pdf[m].fillna(0), name=(labels or {}).get(m, m.replace("_", " ")),
                     marker_color=SERIES[i % len(SERIES)], error_y=err)
-    fig.update_yaxes(range=[0, 1.05], title="Score (anomalous = positive class)")
+    fig.update_yaxes(range=[0, 1.1], title="Score (anomalous = positive class)")
     fig.update_layout(title=title, barmode="group", bargap=0.25,
                       legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.15))
     return save(fig, out_dir, name, height=850)
@@ -218,3 +224,75 @@ def silhouette(pdf, best_k, out_dir):
     fig.update_yaxes(title="Silhouette score")
     fig.update_layout(title="K-Means: silhouette by k")
     return save(fig, out_dir, "fig_kmeans_silhouette", width=1200, height=750)
+
+
+def roc_pr(curves, out_dir, name, title):
+    """curves: list of dict(label, fpr, tpr, roc_auc, recall, precision, pr_auc); positive-class prevalence
+    as `prevalence` (the no-skill PR line). Both panels use the same 0-1 axes for every model."""
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("ROC curve (test windows)", "Precision-recall curve (test windows)"),
+                        horizontal_spacing=0.1)
+    for i, c in enumerate(curves):
+        col = SERIES[i % len(SERIES)]
+        width = 4 if i == 0 else 2.5
+        fig.add_trace(go.Scatter(x=c["fpr"], y=c["tpr"], mode="lines", name=f"{c['label']} (AUC {c['roc_auc']:.2f})",
+                                 legendgroup=c["label"], line=dict(color=col, width=width)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=c["recall"], y=c["precision"], mode="lines", line_shape="hv",
+                                 name=f"{c['label']} (AP {c['pr_auc']:.2f})", legendgroup=c["label"],
+                                 line=dict(color=col, width=width)), row=1, col=2)
+    fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="chance", line=dict(color=OTHER, dash="dash")),
+                  row=1, col=1)
+    if curves:
+        prev = curves[0]["prevalence"]
+        fig.add_trace(go.Scatter(x=[0, 1], y=[prev, prev], mode="lines", name=f"no skill (prevalence {prev:.2f})",
+                                 line=dict(color=OTHER, dash="dot")), row=1, col=2)
+    fig.update_xaxes(range=[0, 1], showgrid=True)
+    fig.update_yaxes(range=[0, 1.02])
+    fig.update_xaxes(title="False positive rate", row=1, col=1)
+    fig.update_yaxes(title="True positive rate (recall)", row=1, col=1)
+    fig.update_xaxes(title="Recall", row=1, col=2)
+    fig.update_yaxes(title="Precision", row=1, col=2)
+    fig.update_layout(title=title, legend=dict(x=1.01, y=0.5, yanchor="middle", font=dict(size=14)))
+    return save(fig, out_dir, name, width=1900, height=850)
+
+
+def training_curves(hist, out_dir, name, title):
+    """hist: epoch, train_loss, val_loss, val_pr_auc, seed (one model variant). One line per seed."""
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("Loss (class-weighted BCE)", "Validation PR-AUC"),
+                        horizontal_spacing=0.1)
+    for i, (seed, h) in enumerate(hist.groupby("seed")):
+        col = SERIES[i % len(SERIES)]
+        fig.add_trace(go.Scatter(x=h["epoch"], y=h["train_loss"], mode="lines", name=f"seed {seed}: train",
+                                 legendgroup=str(seed), line=dict(color=col, width=2.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=h["epoch"], y=h["val_loss"], mode="lines", name=f"seed {seed}: validation",
+                                 legendgroup=str(seed), line=dict(color=col, width=2.5, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=h["epoch"], y=h["val_pr_auc"], mode="lines", name=f"seed {seed}: val PR-AUC",
+                                 legendgroup=str(seed), showlegend=False, line=dict(color=col, width=2.5)), row=1, col=2)
+        b = h.loc[h["val_pr_auc"].idxmax()]
+        fig.add_trace(go.Scatter(x=[b["epoch"]], y=[b["val_pr_auc"]], mode="markers", showlegend=False,
+                                 legendgroup=str(seed), marker=dict(color=col, size=12, symbol="star")), row=1, col=2)
+    fig.update_xaxes(title="Epoch")
+    fig.update_yaxes(title="Loss", row=1, col=1)
+    fig.update_yaxes(title="PR-AUC (star = best epoch, weights kept)", range=[0, 1.02], row=1, col=2)
+    fig.update_layout(title=title, legend=dict(x=1.01, y=0.5, yanchor="middle", font=dict(size=13)))
+    return save(fig, out_dir, name, width=1900, height=850)
+
+
+def scalability(df, cores, out_dir):
+    """df: executors, time_mean, time_std, speedup. Time with error bars, and speedup vs ideal."""
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("Run time (mean ± std of the runs)", "Speedup vs 1 executor"),
+                        horizontal_spacing=0.12)
+    x = [str(e) for e in df["executors"]]
+    fig.add_bar(x=x, y=df["time_mean"], marker_color=SERIES[0], name="time",
+                error_y=dict(type="data", array=df["time_std"].fillna(0), visible=True, thickness=1.5, width=6),
+                text=[f"{v:.0f} s" for v in df["time_mean"]], textposition="outside", cliponaxis=False, row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["executors"], y=df["speedup"], mode="lines+markers", name="measured",
+                             line=dict(color=SERIES[1], width=3), marker=dict(size=12)), row=1, col=2)
+    fig.add_trace(go.Scatter(x=df["executors"], y=df["executors"] / df["executors"].min(), mode="lines", name="ideal (linear)",
+                             line=dict(color=OTHER, dash="dash")), row=1, col=2)
+    fig.update_xaxes(title="Spark executors on YARN", row=1, col=1)
+    fig.update_xaxes(title="Spark executors on YARN", tickvals=list(df["executors"]), row=1, col=2)
+    fig.update_yaxes(title="Seconds", rangemode="tozero", row=1, col=1)
+    fig.update_yaxes(title="Speedup", rangemode="tozero", row=1, col=2)
+    fig.update_layout(title=f"Scalability: Spark preprocessing + windowing through YARN ({cores} CPU cores)",
+                      legend=dict(x=1.01, y=0.5))
+    return save(fig, out_dir, "fig_scalability", width=1700, height=800)

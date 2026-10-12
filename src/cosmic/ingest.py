@@ -146,12 +146,30 @@ def partition_pruning_test(spark, cfg):
     return pdf
 
 
+def hdfs_bytes(spark, cfg, path):
+    """Total size in bytes of an HDFS file or folder (Hadoop FileSystem API)."""
+    jvm = spark._jvm
+    fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(cfg.hdfs_uri("/")),
+                                                 spark._jsc.hadoopConfiguration())
+    return int(fs.getContentSummary(jvm.org.apache.hadoop.fs.Path(cfg.hdfs_uri(path))).getLength())
+
+
 def dataset_summary(spark, cfg):
     t = cfg.table("observations_raw")
     s = spark.sql(f"""SELECT COUNT(*) AS total_rows, COUNT(DISTINCT auid) AS stars,
-                             COUNT(DISTINCT observer) AS observers, MIN(jd) AS jd_min, MAX(jd) AS jd_max,
+                             COUNT(DISTINCT observer) AS observers, COUNT(DISTINCT band) AS bands,
+                             COUNT(DISTINCT obs_type) AS observation_types, MIN(jd) AS jd_min, MAX(jd) AS jd_max,
                              SUM(CASE WHEN fainterthan THEN 1 ELSE 0 END) AS fainter_than_rows
                       FROM {t}""").toPandas()
+    s.insert(0, "raw_csv_mb_in_hdfs", round(hdfs_bytes(spark, cfg, f"{cfg.hdfs_base}/raw") / 1048576, 2))
+    s.insert(1, "parquet_mb_in_hdfs",
+             round(hdfs_bytes(spark, cfg, f"{cfg.hdfs_base}/warehouse/observations_raw") / 1048576, 2))
+    audit_file = os.path.join(cfg.output_dir, "audit_summary.csv")
+    if os.path.exists(audit_file):  # the audit's de-duplicated size, if the audit has been run
+        a = pd.read_csv(audit_file).set_index("item")["value"]
+        key = [k for k in a.index if k.startswith("unique-observation size, MB")]
+        if key:
+            s.insert(1, "unique_observation_mb_audit", float(a[key[0]]))
     to_date = lambda jd: str(pd.Timestamp("1970-01-01") + pd.to_timedelta(jd - 2440587.5, unit="D"))[:10]
     s["date_min"] = s["jd_min"].map(to_date)
     s["date_max"] = s["jd_max"].map(to_date)

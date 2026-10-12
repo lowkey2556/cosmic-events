@@ -77,15 +77,16 @@ ignored, and so is any folder named `DOWNLOAD_LOG`.
 
 ```
 MyDrive/
-├── cosmic_roja/            <- the data root: DATA_ROOT in the notebook (= data_root in settings.yaml)
+├── cosmic_roja/            <- the project folder: DATA_ROOT in the notebook (= root and data_root in settings.yaml)
 │   ├── raw/                 <- 2024 files (AAVSO default names, observations_*.csv)
 │   ├── existing/            <- the original January 2025 files
 │   ├── <any new folder>/    <- later rounds; any depth and any file names work
-│   └── DOWNLOAD_LOG/        <- ignored, if present
+│   ├── DOWNLOAD_LOG/        <- ignored, if present
+│   ├── labels/              <- created automatically: vsx_labels.csv (never read as data)
+│   ├── work/                <- created automatically: window tensors, splits, predictions (never read as data)
+│   └── outputs/review2/     <- created automatically: all Review 2 outputs (never read as data)
 └── cosmic/
-    ├── labels/              <- Step 1 / the audit fetch VSX rows and write vsx_labels.csv here
-    ├── cache/               <- created automatically (Hadoop/Spark/Hive tarballs)
-    └── outputs/review2/     <- created automatically (all Review 2 outputs)
+    └── cache/               <- created automatically (Hadoop/Spark/Hive tarballs)
 ```
 
 ## Labels (VSX)

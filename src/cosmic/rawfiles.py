@@ -21,14 +21,17 @@ RAW_COLUMNS = ["#", "target", "auid", "jd", "mag", "uncertainty", "fainterthan",
                "chart", "commentcode", "comments"]
 
 
-def find_csv_files(root, exclude_dirs=("DOWNLOAD_LOG",)):
-    """Sorted paths of every *.csv under `root`, skipping excluded folder names (case-insensitive)."""
+def find_csv_files(root, exclude_dirs=("DOWNLOAD_LOG",), exclude_paths=()):
+    """Sorted paths of every *.csv under `root`, skipping excluded folder names (case-insensitive)
+    and the excluded folders themselves (e.g. the pipeline's own output, labels and work folders)."""
     if not os.path.isdir(root):
         raise FileNotFoundError(f"Data folder not found: {root}")
     excluded = {d.upper() for d in exclude_dirs or []}
+    skip = {os.path.normcase(os.path.abspath(p)) for p in exclude_paths}
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d.upper() not in excluded)
+        dirnames[:] = sorted(d for d in dirnames if d.upper() not in excluded
+                             and os.path.normcase(os.path.abspath(os.path.join(dirpath, d))) not in skip)
         out += [os.path.join(dirpath, f) for f in sorted(filenames) if f.lower().endswith(".csv")]
     return out
 
@@ -62,7 +65,9 @@ def check_headers(files, root):
 def discover(cfg):
     """(root, accepted_files, skipped) for the configured dataset."""
     root = cfg.raw_dir
-    files = find_csv_files(root, cfg.section("ingest").get("exclude_dirs", ["DOWNLOAD_LOG"]))
+    own = [os.path.dirname(cfg.labels_file), cfg.work_dir, cfg.output_dir,
+           os.path.join(cfg.root, cfg.ds["output_subdir"].replace("\\", "/").split("/")[0])]
+    files = find_csv_files(root, cfg.section("ingest").get("exclude_dirs", ["DOWNLOAD_LOG"]), exclude_paths=own)
     accepted, skipped = check_headers(files, root)
     print(f"{len(files)} CSV files under {root}: {len(accepted)} accepted, {len(skipped)} skipped")
     return root, accepted, skipped

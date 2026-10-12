@@ -1,9 +1,9 @@
 # How to run the project in Google Colab
 
-This guide covers **what is built so far**: the dataset audit (Step 0), the Big Data stack, and
-pipeline Steps 1–6. Sections marked *(coming later)* will be filled in as windowing, RGA-Net,
-the model comparison and the scalability test are added. The final version of this guide is
-written when everything else is finished.
+A step-by-step guide to running the whole Review 2 pipeline: the dataset audit, the Big Data
+stack (HDFS, YARN, Spark, Hive), preprocessing, windowing, the four ML models, RGA-Net, the
+comparison and the scalability test. Times below are rough estimates for about 100 MB of data on
+a standard Colab GPU machine; your runs may be faster or slower.
 
 ---
 
@@ -11,95 +11,82 @@ written when everything else is finished.
 
 ### 1.1 Check your Google Drive layout
 
-Your data must be laid out like this before you start:
-
 ```
 MyDrive/
-├── cosmic_roja/            <- your data (DATA_ROOT)
-│   ├── raw/                <- the 2024 CSVs (observations_20261012_*.csv)
-│   └── existing/           <- the January 2025 CSVs
-└── cosmic/                 <- created automatically on the first run
-    ├── cache/              <- Hadoop/Spark/Hive downloads (saves time after a reset)
-    ├── labels/             <- vsx_labels.csv (star types fetched from VizieR)
-    └── outputs/review2/    <- every table and figure for Review 2
+├── cosmic_roja/                 <- your project folder (DATA_ROOT)
+│   ├── raw/                     <- the 2024 CSVs (observations_20261012_*.csv)
+│   ├── existing/                <- the January 2025 CSVs
+│   ├── labels/                  <- created automatically: vsx_labels.csv (star types from VizieR)
+│   ├── work/                    <- created automatically: window tensors and predictions
+│   └── outputs/review2/         <- created automatically: every table and figure for Review 2
+└── cosmic/cache/                <- created automatically: Hadoop/Spark/Hive downloads (saves time after a reset)
 ```
 
 - File names don't matter. Stars are identified by their `auid`.
-- Only `.csv` files are read. ZIPs and other files are ignored, and so is any folder named `DOWNLOAD_LOG`.
+- Only `.csv` files in `cosmic_roja/` and its sub-folders are read. ZIPs, other files, any
+  `DOWNLOAD_LOG` folder, and the pipeline's own `labels/`, `work/` and `outputs/` folders are ignored.
 - You can add new sub-folders inside `cosmic_roja/` later; they are found automatically.
 
 ### 1.2 Open the notebook
 
-Click this link:
+Click: **https://colab.research.google.com/github/lowkey2556/cosmic-events/blob/main/notebooks/cosmic_colab.ipynb**
 
-**https://colab.research.google.com/github/lowkey2556/cosmic-events/blob/main/notebooks/cosmic_colab.ipynb**
-
-(Or in Colab: **File → Open notebook → GitHub**, paste `lowkey2556/cosmic-events`, pick
+(Or in Colab: **File → Open notebook → GitHub**, type `lowkey2556/cosmic-events`, choose
 `notebooks/cosmic_colab.ipynb`.)
 
 To keep your own copy with outputs: **File → Save a copy in Drive**. Work in that copy from now on.
 
-### 1.3 Choose a runtime
+### 1.3 Switch to a GPU runtime
 
-**Runtime → Change runtime type**:
-- For now (Steps 0–6), **CPU** is fine. Choose **High-RAM** if it's offered.
-- *(coming later)* RGA-Net training will need **T4 GPU**. The Big Data stack works on a GPU runtime too.
+**Runtime → Change runtime type → Hardware accelerator: T4 GPU → Save.** RGA-Net trains on the GPU.
+Everything else (the Big Data stack) runs on the CPU of the same machine. If "High-RAM" is offered,
+turn it on.
 
 ### 1.4 Mount Google Drive
 
-Run the first code cell (`drive.mount(...)`). A pop-up asks for permission. Choose your Google
+Run the first code cell (`drive.mount(...)`). A pop-up asks for permission: choose your Google
 account and allow access. You should see `Mounted at /content/drive`.
 
 ---
 
 ## 2. Run order
 
-Run the cells **from top to bottom**, one at a time the first time, so you can check each result.
-(Later you can use **Runtime → Run all**.)
+The first time, run the cells **one by one from the top** and check each result. Later you can use
+**Runtime → Run all**.
 
-| # | Notebook section | Time (approx.) | What you should see when it works |
+| # | Notebook section | Time (estimate) | What you should see when it works |
 |---|---|---|---|
-| 1 | **0. Mount Google Drive and get the code** | < 1 min | `Mounted at /content/drive`, then a list of recent commits (`git log`) |
-| 2 | **Data folder** | seconds | A list of folders: `.../cosmic_roja`, `.../cosmic_roja/existing`, `.../cosmic_roja/raw`. If you see `AssertionError: Drive folder not found`, see §5. |
-| 3 | **Step 0: Dataset audit** | 1–3 min | Tables printed: Files, Per star, Class balance, Skipped files, Unmatched VSX types, then a **SUMMARY**. See §2.1. |
-| 4 | **1. Install the stack** | 6–8 min first time; ~2–4 min after (cache) | Ends without `ERROR`. The `%%time` line at the bottom shows how long it took. |
-| 5 | **2. Start HDFS, YARN, Derby, Hive metastore** | 1–2 min | Lines like `NameNode is up (port 9000)`, `ResourceManager is up`, `metastore is up (port 9083)` |
-| 6 | **Load the stack's environment** | seconds | Version lines: Java 1.8, Hadoop 3.3.6, Spark 3.5.9, Hive 3.1.3 |
-| 7 | **3. Smoke tests** (5 cells) | ~3 min total | Each cell prints `SMOKE TEST n: PASS - ...`. **All five must say PASS** before you continue. |
-| 8 | Optional: web UIs | seconds | Links that open the YARN (8088) and HDFS (9870) pages |
-| 9 | **4. Raw data in Drive** | seconds | The list of CSV files that will be ingested |
-| 10 | **5. Architecture diagram** | < 1 min | `saved .../architecture.png`, `.svg`, `.dot` |
-| 11 | **Step 1: Ingestion and storage** | 3–8 min | `hdfs dfs -put` lines, VSX lookups (one per star, ~1 s each, first time only), partition list, pruning table, dataset summary |
-| 12 | **Step 2: Preprocessing** | 2–5 min | The row-count table after each cleaning step |
-| 13 | **Step 3: Observer agreement score** | 3–10 min | Observer score summary, top/bottom 10 observers, Spearman ρ |
-| 14 | **Step 4: Features** | 2–5 min | Feature table saved |
-| 15 | **Step 5: Classification** (one seed) | 2–5 min | Metrics table for NB, DT, LR, RF |
-| 16 | **Step 6: K-Means** | 1–3 min | Silhouette per k, chosen k |
-| 17 | **Review 2 deliverables** | < 1 min | Every table and interactive Plotly figure shown inline |
-
-Times depend on the data size and on Colab. With ~100 MB of data, expect the higher end.
+| 1 | **0. Mount Google Drive and get the code** | < 1 min | `Mounted at /content/drive`, then the latest commits |
+| 2 | **Data folder** | seconds | The folders of `cosmic_roja` (`existing`, `raw`, …). `AssertionError: Drive folder not found` → see §5 |
+| 3 | **GPU check** | seconds | `GPU: Tesla T4` (or similar). `NONE` → see §5 |
+| 4 | **Step 0: Dataset audit** | 1–3 min | Files, Per star, Class balance, Skipped files, Unmatched VSX types, then **SUMMARY** with PASS/FAIL |
+| 5 | **1. Install the stack** | 6–8 min first time; 2–4 min after (cache) | Ends without `ERROR`; `%%time` shows the time |
+| 6 | **2. Start HDFS, YARN, Derby, Hive** | 1–2 min | `NameNode is up (port 9000)`, `ResourceManager is up`, `metastore is up (port 9083)` |
+| 7 | **Load the stack's environment** | seconds | Java 1.8, Hadoop 3.3.6, Spark 3.5.9, Hive 3.1.3 |
+| 8 | **3. Smoke tests** (5 cells) | ~3 min | Each prints `SMOKE TEST n: PASS - …` (see §2.2) |
+| 9 | Optional: web UIs | seconds | Links to YARN (8088) and HDFS (9870) |
+| 10 | **4. Architecture diagram** | < 1 min | `saved …/architecture.png`, `.svg`, `.dot` |
+| 11 | **5. Step 1: Ingestion** | 5–10 min | `hdfs dfs -put` lines; VSX look-ups (only stars not yet in `labels/`); partitions; pruning table; dataset summary |
+| 12 | **6. Step 2: Preprocessing** | 3–8 min | The row-count table after each step (thinning is step 5) |
+| 13 | **7. Step 3: Observer score** | 3–10 min | Score summary, top/bottom 10 observers, Spearman ρ |
+| 14 | **8. Step 4: Per-star features** | 2–5 min | Feature log |
+| 15 | **9. Step 5: Windowing** | 5–15 min | Windows per class and per split, the list of stars not used (with reasons), `saved …/windows_seq.npz` |
+| 16 | **10. Step 6: K-Means** | 1–3 min | Silhouette per k |
+| 17 | **11. Step 7: ML models** | 10–30 min | One line per seed / feature set / model with its chosen setting and validation PR-AUC |
+| 18 | **12. Step 8: RGA-Net** | 10–40 min on a T4 GPU (hours on CPU) | `RGA-Net on GPU: …`, then one line per variant and seed (best epoch, validation PR-AUC, λ), then the learned λ table |
+| 19 | **13. Step 9: Comparison** | < 1 min | The comparison, star-level and ablation tables; `saved …/COMPARISON.md` |
+| 20 | **14. Step 10: Scalability** | 30–90 min (9 runs) | One line per run (`… s (Spark steps), executors granted by YARN: n`), then the summary table |
+| 21 | **Review 2 results** | < 1 min | Every table and interactive figure, and COMPARISON.md |
 
 ### 2.1 Reading the audit result (Step 0)
 
-The **SUMMARY** table at the end is what matters most:
+The **SUMMARY** table at the end:
 
-- `total CSV size, MB` and **`target 50 MB: total size` → PASS or FAIL.**
-- `unique-observation size, MB` and **`target 50 MB: unique-observation size` → PASS or FAIL.**
-  This is the size after removing observations that appear in more than one file
-  (overlapping downloads). **Use this number on the slide.** It is the honest one.
-- `repeated rows`: how many rows were repeats. A large number means some downloads overlap.
-- `stars`, `observers`, `bands`, `first date`, `last date`.
-- `windows (raw detections, before cleaning)`: a first count of the 100-day windows the
-  models will use. The final count after cleaning can be lower.
-
-Also check:
-- **Skipped files**: should say `(none)`. Any file listed there had a header that is not the
-  AAVSO export header, so it was **not used**.
-- **Unmatched VSX types**: stars that get no label (no VSX match, or a type not in
-  `config/label_map.yaml`). They are excluded from training. Send me this list.
-- **Class balance**: how many stars, rows and windows are anomalous / normal / unlabelled.
-
-1 MB here = 1,048,576 bytes, the same as Windows and Google Drive show.
+- `target 50 MB: total size` and **`target 50 MB: unique-observation size` → PASS or FAIL.** The
+  second one is the size after removing observations that appear in more than one file. **Quote
+  this one on the slide.**
+- `repeated rows`: how many rows were repeats from overlapping downloads.
+- **Skipped files** should say `(none)`. **Unmatched VSX types** lists stars that get no label.
 
 ### 2.2 What a passing smoke test looks like
 
@@ -113,59 +100,95 @@ SMOKE TEST 5: PASS - ...
 
 If any says `FAIL`, stop and see §5.
 
+### 2.3 Checking which stars are used (Step 5)
+
+After windowing, the cell prints how many stars are in the raw data, how many are used, and a
+table of every star that is **not** used with the reason, for example:
+
+- `unlabelled (no VSX match)` or `unlabelled (VSX type GCAS not in label map)`: no class to learn;
+- `all rows removed at: …`: a preprocessing step removed every row of that star;
+- `no 100-day window with >= 20 observations (N clean detections in total)`: too little data.
+
+The full list is `star_attrition.csv`.
+
 ---
 
 ## 3. What each output means
 
-All files are in `MyDrive/cosmic/outputs/review2/`. Every graph is a **Plotly** figure, saved
-three ways:
+All files are in `MyDrive/cosmic_roja/outputs/review2/`. Every graph is a **Plotly** figure saved
+as `fig_*.png` (slides), `fig_*.html` (interactive: open it in a browser) and `fig_*.json` (used by
+the notebook). `figure_export_log.csv` lists any figure whose PNG export failed; the HTML is
+always kept.
 
-- `fig_*.png`: for the slides;
-- `fig_*.html`: interactive (zoom, hover); double-click it in Drive or download and open in a browser;
-- `fig_*.json`: used by the notebook to show the figure inline.
+### Dataset slide
 
-`figure_export_log.csv` lists any figure whose PNG export failed. The HTML is always kept, and
-the notebook prints the failures. Tell me if there are any.
+| File | What it shows | How to read it |
+|---|---|---|
+| `audit_summary.csv` | Total size, PASS/FAIL against 50 MB, rows, stars, observers, dates | Quote the unique-observation MB and its PASS/FAIL. |
+| `dataset_summary.csv` | Size in HDFS (raw CSV and Parquet), rows, stars, observers, bands, observation types, date range | The dataset as loaded into Hive. |
+| `audit_class_balance.csv` | Anomalous / normal / unlabelled stars, rows, windows | Shows how balanced the two classes are. |
+| `fig_obs_per_star` | Observations per star, coloured by class | Taller bar = more observations (log scale). |
 
-| File | What it shows | Slide | How to read it |
-|---|---|---|---|
-| `audit_summary.csv` | Total size, PASS/FAIL against 50 MB, rows, stars, observers, dates | Dataset | Quote the unique-observation MB and its PASS/FAIL. |
-| `audit_files.csv` | Size, rows, stars, observers, dates per file | Dataset | `repeated_rows` > 0 means the file overlaps an earlier one. |
-| `audit_stars.csv` | Per star: rows, observers, dates, coverage, windows | Dataset | Stars with few windows add little to training. |
-| `audit_class_balance.csv` | Anomalous / normal / unlabelled by stars, rows, windows | Dataset | Shows whether the two classes are balanced. |
-| `audit_skipped_files.csv`, `audit_unmatched_vsx_types.csv` | What was left out, and why | Dataset (backup) | Should be empty or short. |
-| `dataset_summary.csv`, `rows_per_band.csv`, `rows_per_type.csv`, `label_counts.csv` | The ingested dataset in numbers | Dataset | The totals after loading into Hive. |
-| `fig_obs_per_star.png/.html` | Observations per star, coloured by class | Dataset | Taller bar = more observations (log scale). |
-| `architecture.png` (+ `.svg`, `.dot`) | The pipeline, with the tool at each stage | Architecture | Follow the arrows; the colours show the tool family. |
-| `preprocess_row_counts.csv`, `fig_preprocessing_funnel.png/.html` | Rows left after each cleaning step | Preprocessing results | Each bar is one step; the drop between bars is what that step removed. |
-| `partition_pruning.csv`, `fig_partition_pruning.png/.html` | Files and MB scanned by the same query, partitioned vs unpartitioned | Preprocessing results | Fewer MB scanned on the partitioned table = pruning works. |
-| `fig_lightcurve_before_after.png/.html`, `lightcurve_star.csv` | One star's light curve, raw vs band-normalised, coloured by observer | Preprocessing results | Up = brighter. After normalisation, bands line up on one curve. |
-| `fig_observer_score_hist.png/.html`, `observer_score_summary.csv`, `observer_scores.csv` | Distribution of observer agreement scores A_k | Preprocessing results | Right = agrees more with other observers. |
-| `observer_top_bottom10.csv` | Most and least consistent observers | Preprocessing results | Bottom 10 have the largest scatter against peers. |
-| `spearman_score_vs_uncertainty.csv` | Does A_k agree with observers' own error bars? | Preprocessing results | Negative ρ = observers with bigger stated errors score lower. |
-| `model_metrics.csv`, `fig_model_comparison.png/.html`, `fig_confusion_*.png/.html` | Milestone 1 classifiers, **one seed** | (preliminary) | Will be replaced by the 5-seed comparison. |
-| `fig_kmeans_silhouette.png/.html`, `kmeans_*.csv` | K-Means cluster quality | (supporting) | Highest silhouette = chosen k. |
-| *(coming later)* comparison table, ablation table, ROC/PR curves, confusion-matrix grid, training curves, scalability table | The main Review 2 results | Comparison | Explained here when built. |
+### Architecture slide
+
+`architecture.png` (+ `.svg`, `.dot`): follow the arrows from Drive to Plotly; the colour of each
+box is the tool family (legend bottom right); orange dashed arrows = tables registered in Hive.
+
+### Preprocessing results slide
+
+| File | What it shows | How to read it |
+|---|---|---|
+| `preprocess_row_counts.csv`, `fig_preprocessing_funnel` | Rows left after each step, with the % each step removed | The orange bar is thinning: it removes most rows, all from observers who took more than 10 points of one star in one night. |
+| `partition_pruning.csv`, `fig_partition_pruning` | Files and MB scanned by the same query, partitioned vs unpartitioned | Fewer MB scanned on the partitioned table = pruning works. |
+| `fig_lightcurve_before_after` | One star, raw vs band-normalised, coloured by observer | Up = brighter. After normalisation the bands line up on one curve. |
+| `fig_observer_score_hist`, `observer_score_summary.csv` | Distribution of the observer agreement score A_k | Right = agrees more with other observers. |
+| `star_attrition.csv` | Every star: rows after each step, windows, used or not, why | Explains exactly which stars are in the models. |
+
+### Proposed model slide (RGA-Net)
+
+| File | What it shows | How to read it |
+|---|---|---|
+| `fig_rganet_training_curves` | Training (solid) and validation (dashed) loss per epoch, and validation PR-AUC; one colour per split | The star marks the epoch whose weights were kept. Validation loss rising while training loss falls = overfitting, which early stopping cuts off. |
+| `rganet_learned_lambda.csv` | The learned gate strengths λ per seed | λ near 0 = the network chose not to use the gate; larger λ = more attention to reliable observers. |
+| `ablation_table.csv`, `fig_ablation` | Full vs no-gate vs observer-blind | If "full" beats "no gate", the gate itself helps; if "no gate" beats "observer-blind", observer information helps at all. Check the ± spread before concluding. |
+
+### Comparison slide (main result)
+
+| File | What it shows | How to read it |
+|---|---|---|
+| `comparison_table.csv` | RGA-Net vs NB, DT, RF, LR on test windows: 6 metrics, mean ± std over 5 splits, training time | Higher is better for every metric. Compare the gap with the ± values. |
+| `comparison_table_star_level.csv` | The same per star (mean window probability) | The stricter view; fewer test items, so bigger ± values. |
+| `fig_comparison_metrics` | Grouped bars with error bars | Each group is a model; error bars = spread over the 5 splits. |
+| `fig_roc_pr_curves` | ROC and precision-recall curves of all 5 models on one split | Curve closer to the top-left (ROC) or top-right (PR) = better ranking of anomalous windows. |
+| `fig_confusion_matrices` | One 2×2 table per model on one split | Diagonal = correct; bottom-left = missed anomalous windows; top-right = false alarms. |
+| `COMPARISON.md` | Written summary from the numbers | Says which model is best on which metric, by how much, and whether the gap is bigger than the seed-to-seed spread. Use its wording; don't overstate. |
+| `ml_observer_features_table.csv` | ML models with vs without the observer features (backup slide) | Shows whether observer information helps the classical models. |
+
+### Scalability slide
+
+`scalability.csv`, `fig_scalability`: mean ± std time of preprocessing + windowing with 1, 2 and 4
+YARN executors, the speedup, how many executors YARN actually granted, and the CPU core count. On a
+2-core machine, expect little gain beyond 2 executors: that is a property of the machine, not a bug.
 
 ---
 
 ## 4. When Colab disconnects or resets
 
-**What is lost:** everything on the Colab machine. That means the installed stack, HDFS
-contents, Hive tables, and the cloned code.
+**What is lost:** everything on the Colab machine: the installed stack, HDFS contents, Hive tables,
+and the cloned code.
 
-**What survives (in Drive):** your data (`cosmic_roja/`), the download cache (`cosmic/cache/`),
-the VSX labels (`cosmic/labels/`), and every output (`cosmic/outputs/review2/`).
+**What survives (in Drive):** your data, `cosmic_roja/labels/`, `cosmic_roja/work/` (window
+tensors `windows_seq.npz`, `splits.csv`, all predictions), `cosmic_roja/outputs/review2/` (every
+table and figure), and the download cache `cosmic/cache/`.
 
 **Quickest way back:**
-- **Only the kernel restarted** (**Runtime → Restart session**; the machine is still alive):
-  run the Drive, code and Data folder cells, then `!bash setup/start_stack.sh` and the
-  "Load the stack's environment" cell. HDFS and Hive data are still there; skip the install.
-- **Full reset / disconnected** (the machine is gone): **Runtime → Run all**. The install uses
-  the cache, so it's faster. HDFS starts empty, so Step 1 must re-ingest, and every later step
-  must re-run, because each reads the previous step's Hive tables.
-- **Only want to look at results?** Run the Drive cell, then the cells under
-  **Review 2 deliverables**. They read straight from Drive and need no stack.
+
+| What you want | What to run |
+|---|---|
+| Just **look at** the results | Mount Drive, then the **Review 2 results** cells. No stack needed. |
+| Re-run **RGA-Net** or the **comparison** | Mount Drive, clone, Data folder, then `!python run.py rganet --data real` and/or `!python run.py compare --data real`. No stack needed: they read `work/`. |
+| Re-run the **ML models** or anything in Spark | The Hive tables are gone, so run: install → start → environment → Steps 1, 2, 3, 5 → then Step 7. (Step 4 and 6 only if you need K-Means.) |
+| **Kernel restarted** only (machine still alive) | Mount, clone, Data folder, `!bash setup/start_stack.sh`, the environment cell; HDFS and Hive are still there, so continue where you stopped. |
 
 The audit (Step 0) needs no stack at all. You can re-run it any time after mounting Drive.
 
@@ -175,56 +198,69 @@ The audit (Step 0) needs no stack at all. You can re-run it any time after mount
 
 | Problem | What to do |
 |---|---|
-| `AssertionError: Drive folder not found: /content/drive/MyDrive/cosmic_roja` | Drive isn't mounted, or the folder name differs. Re-run the mount cell. In the Files panel (left), open `drive/MyDrive` and check the exact name (capital letters matter). Fix `DATA_ROOT` in the Data folder cell if needed. |
-| Files listed under **Skipped files** | Their first line isn't the AAVSO header. Open one in Drive and compare with `docs/DATA_DOWNLOAD.md`. Re-download it as CSV with a header row. Don't edit files by hand. |
-| A smoke test says `FAIL`, or HDFS/YARN didn't start | Run `!bash setup/start_stack.sh` again (it only starts what's missing). Then run `!jps`. You should see NameNode, DataNode, ResourceManager, NodeManager and the metastore (RunJar). Logs are in the folder printed by the start script. If it still fails: **Runtime → Disconnect and delete runtime**, then **Run all**. |
-| Hive metastore errors (`Could not connect to meta store`, `thrift://localhost:9083`) | The metastore didn't start or stopped. Run `!bash setup/start_stack.sh`, then smoke test 4. |
-| `Java heap space`, `Container killed ... beyond memory limits`, or the session crashes | Use a **High-RAM** runtime if available. Re-run the failed step. You can also lower parallelism: `!python run.py <step> --data real --set spark.shuffle_partitions=24`. |
-| `ModuleNotFoundError` (e.g. `yaml`, `plotly`) | Re-run the install cell (it installs `requirements.txt`). For the audit alone: `!pip -q install pyyaml astropy astroquery`. |
-| `RuntimeError: Graphviz dot not found` | Run `!apt-get -qq install -y graphviz`, then the architecture cell again. |
+| `AssertionError: Drive folder not found: /content/drive/MyDrive/cosmic_roja` | Drive isn't mounted, or the folder name differs. Re-run the mount cell; in the Files panel (left) open `drive/MyDrive` and check the exact name (capital letters matter); fix `DATA_ROOT` if needed. |
+| GPU check says `NONE` | **Runtime → Change runtime type → T4 GPU**, then reconnect and run from the top. If Colab says no GPU is available (usage limits), you can still run everything; RGA-Net will train on the CPU and take much longer. |
+| HDFS or YARN not starting; a smoke test says `FAIL` | Run `!bash setup/start_stack.sh` again (it only starts what's missing), then `!jps`: you should see NameNode, DataNode, ResourceManager, NodeManager and RunJar (the metastore). If it still fails: **Runtime → Disconnect and delete runtime**, then run from the top. |
+| Hive metastore errors (`Could not connect to meta store`, `thrift://localhost:9083`) | Run `!bash setup/start_stack.sh`, then smoke test 4. |
+| `Table or view not found: cosmic.window_features` (or another table) | That table comes from an earlier step that was not run in this session (e.g. after a reset). Run the earlier steps first (see §4). |
+| Out of memory: `Java heap space`, `Container killed … beyond memory limits`, or the session crashes | Turn on **High-RAM** if offered and re-run the failed step. You can lower Spark's parallelism: `!python run.py <step> --data real --set spark.shuffle_partitions=24`. For RGA-Net on a small GPU: `--set rganet.batch_size=32`. |
+| `CUDA out of memory` | `!python run.py rganet --data real --set rganet.batch_size=32` |
+| Files listed under **Skipped files** | Their first line isn't the AAVSO header; they were **not used**. Re-download them as CSV with a header row. Don't edit files by hand. |
+| `ModuleNotFoundError` (e.g. `yaml`, `plotly`) | Re-run the install cell (it installs `requirements.txt`). For the audit alone, its own cell installs what it needs. |
 | `PNG export failed` warnings | The HTML files are still saved. Tell me what `figure_export_log.csv` says. |
-| VizieR lookups fail (network) | Re-run Step 1 later. Stars already looked up are kept in `cosmic/labels/vsx_labels.csv` and are not queried again. |
-| *(coming later)* GPU not available | Covered when RGA-Net is added. |
+| `RuntimeError: Graphviz dot not found` | `!apt-get -qq install -y graphviz`, then the architecture cell again. |
+| VizieR look-ups fail (network) | Re-run Step 1 later. Stars already looked up are kept in `cosmic_roja/labels/vsx_labels.csv`. |
+| Scalability: "YARN granted fewer executors than requested" | The machine ran out of memory for more executors; the table shows what was granted. Report it as measured. |
 
 ---
 
 ## 6. Adding new data
 
-1. Put the new CSVs in a **new sub-folder** of `cosmic_roja/` (or into `raw/`). Don't delete or rename old files.
-2. Re-run, in order: **Data folder**, **Step 0 audit**, then (with the stack running) **Steps 1 → 6**.
-   Step 1 clears `/cosmic/raw` in HDFS and re-uploads everything, so removed files never linger.
-3. New stars are looked up in VSX automatically (only the new ones).
-4. Check the audit's **Skipped files**, **Unmatched VSX types** and **repeated rows**.
+1. Put the new CSVs in a **new sub-folder** of `cosmic_roja/` (or into `raw/`). Don't delete or
+   rename old files.
+2. Re-run, in order: **Data folder**, **Step 0 audit**, then (with the stack running) **Steps 1 → 9**,
+   and Step 10 if you want new scalability numbers. Step 1 clears `/cosmic/raw` in HDFS and
+   re-uploads everything, so removed files never linger. New stars are looked up in VSX automatically.
+3. Check the audit's **Skipped files**, **Unmatched VSX types** and **repeated rows**, and the
+   windowing step's list of stars not used.
+4. Every table and figure is regenerated from the new data. Nothing old is reused.
 
 ---
 
 ## 7. Before the review
 
-1. **Run all** once more on the final data, and check that every smoke test says PASS.
+1. Make sure the last full run used the final data (check `audit_summary.csv`).
 2. **File → Save** (this keeps the outputs in the notebook).
-3. **Share → General access: Anyone with the link → Viewer → Copy link.** That is your
-   view-only Colab link.
-4. **Download figures for slides:** in Drive, open `cosmic/outputs/review2/`, select the
-   `fig_*.png` files and `architecture.png`, then right-click → **Download** (Drive zips them).
-5. Checklist:
-   - [ ] Audit: unique-observation size PASS (≥ 50 MB), no unexpected skipped files
+3. **Share → General access: Anyone with the link → Viewer → Copy link.** That is your view-only
+   Colab link.
+4. **Figures for slides:** in Drive, open `cosmic_roja/outputs/review2/`, select the `fig_*.png`
+   files and `architecture.png`, right-click → **Download** (Drive zips them). Open `COMPARISON.md`
+   for the wording of the results.
+5. Final checklist:
+   - [ ] Audit: unique-observation size **PASS** (≥ 50 MB); no unexpected skipped files
    - [ ] All 5 smoke tests PASS
-   - [ ] Steps 1–6 ran without errors on the final data
-   - [ ] `figure_export_log.csv` shows PNG = True for every figure
+   - [ ] `star_attrition.csv` reviewed: you can explain every star that is not used
+   - [ ] Steps 1–10 ran without errors on the final data
+   - [ ] `comparison_table.csv`, `ablation_table.csv`, `rganet_learned_lambda.csv`, `COMPARISON.md` present
+   - [ ] `figure_export_log.csv` shows `png = True` for every figure
+   - [ ] Slides quote `COMPARISON.md` honestly (including where RGA-Net is not best)
    - [ ] Notebook saved with outputs and shared view-only
-   - [ ] *(coming later)* comparison, ablation and scalability results present
 
 ---
 
 ## 8. Live demo tips
 
-If the faculty asks to see the stack working, run these cells live (after the stack is started):
+If the faculty asks to see the stack working, run these after the stack is started (each takes
+seconds):
 
-1. **HDFS:** `!hdfs dfs -ls -R -h "/cosmic/raw" | head -20` shows the raw files stored in HDFS.
+1. **HDFS:** `!hdfs dfs -ls -R -h "/cosmic/raw" | head -20` — the raw CSVs stored in HDFS,
+   in the same sub-folders as in Drive.
 2. **Hive:** `!hive -S -e "USE cosmic; SHOW TABLES;"` and
-   `!hive -S -e "SHOW PARTITIONS cosmic.observations_raw;"` show the tables and partitions as Hive sees them.
-3. **YARN:** `!yarn application -list -appStates ALL | tail -10` lists the Spark jobs that ran on YARN.
-   (Or open the YARN web UI on port 8088 with the optional cell.)
-4. **A smoke test:** `!bash setup/smoke_tests.sh 3` submits SparkPi to YARN live and prints PASS.
+   `!hive -S -e "SELECT label, COUNT(*) FROM cosmic.window_features GROUP BY label;"` — the
+   pipeline's tables, and the windows per class, read by Hive itself.
+3. **YARN:** `!yarn application -list -appStates ALL | tail -10` — every Spark job that ran on YARN
+   (or open the YARN web UI on port 8088 with the optional cell).
+4. **Spark on YARN, live:** `!bash setup/smoke_tests.sh 3` — submits SparkPi to YARN and prints PASS.
 
-Each of these takes a few seconds, so they're safe to run in front of the panel.
+To show RGA-Net itself, open `src/cosmic/rganet.py` at `GatedSelfAttention.forward`: the line
+`s = s + self.lam() * log_a[...]` is the reliability gate, `score(i, j) = q·k/√d + λ·log(A_j + ε)`.

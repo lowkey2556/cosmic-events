@@ -9,12 +9,18 @@ What it does, in order (row counts are logged after every step into the Hive tab
   4. Split out "fainter-than" rows (the star was NOT seen; mag is only an upper limit)
      into `obs_upper_limits`. They are excluded from magnitude statistics but still
      count toward observing cadence in Step 4.
-  5. Thin dense CCD time series: at most N points per (star, band, observer, night),
-     evenly spaced, so one observer's 500-point night cannot dominate.
+  5. Thin dense time series: at most N points per (star, band, observer, night), evenly
+     spaced in time (N = preprocess.max_obs_per_observer_night; null or 0 switches it off).
+     A few CCD observers take hundreds of points of one star in one night; without the cap
+     they would supply most of the rows and dominate every statistic, every window and the
+     observer scores. Thinning keeps their night but removes the repetition.
   6. Band-normalise: mag_norm = mag − median(mag) for each (auid, band), dropping
      (auid, band) groups that are too small for a stable median.
-Outputs: Hive tables `obs_clean`, `obs_upper_limits`, `preprocess_log`, the row-count
-funnel chart and one star's light curve before/after normalisation.
+Rows are also counted PER STAR after every step (Hive table `preprocess_star_log`), so any
+star that disappears can be traced to the exact step that removed it.
+Outputs: Hive tables `obs_clean`, `obs_upper_limits`, `preprocess_log`, `preprocess_star_log`,
+the row-count table and chart (each step with the % it removed), and one star's light
+curve before/after normalisation.
 
 Why: crowdsourced data contain duplicates, gaps and flagged-bad reports. Different
 filters (V, B, visual) sit at different magnitude levels, so comparing observers or
@@ -59,15 +65,20 @@ def transform(spark, source_view, settings):
     log.append(("4 detections (fainter-than split out)", _count(spark, "pp_det")))
     n_upper = upper.count()
 
-    m = int(p["max_obs_per_observer_night"])
-    spark.sql(f"""
-        SELECT * FROM (
-          SELECT *, ROW_NUMBER() OVER (PARTITION BY auid, band, observer, FLOOR(jd - 0.5) ORDER BY jd) AS rn,
-                    COUNT(*)     OVER (PARTITION BY auid, band, observer, FLOOR(jd - 0.5)) AS n_night
-          FROM pp_det)
-        WHERE n_night <= {m} OR (rn - 1) % CAST(CEIL(n_night / {m}) AS INT) = 0""") \
-        .drop("rn", "n_night").createOrReplaceTempView("pp_thin")
-    log.append((f"5 after thinning time series (<= {m}/observer/night)", _count(spark, "pp_thin")))
+    m = int(p.get("max_obs_per_observer_night") or 0)
+    if m > 0:  # rows ordered by time (ties broken by mag, file and row) so the kept points are reproducible
+        spark.sql(f"""
+            SELECT * FROM (
+              SELECT *, ROW_NUMBER() OVER (PARTITION BY auid, band, observer, FLOOR(jd - 0.5)
+                                           ORDER BY jd, mag, source_file, row_num) AS rn,
+                        COUNT(*)     OVER (PARTITION BY auid, band, observer, FLOOR(jd - 0.5)) AS n_night
+              FROM pp_det)
+            WHERE n_night <= {m} OR (rn - 1) % CAST(CEIL(n_night / {m}) AS INT) = 0""") \
+            .drop("rn", "n_night").createOrReplaceTempView("pp_thin")
+        log.append((f"5 after thinning dense time series (<= {m} per observer per night)", _count(spark, "pp_thin")))
+    else:
+        spark.table("pp_det").createOrReplaceTempView("pp_thin")
+        log.append(("5 thinning switched off", _count(spark, "pp_thin")))
 
     min_n = int(p["min_group_size"])
     clean = spark.sql(f"""
@@ -81,6 +92,22 @@ def transform(spark, source_view, settings):
     return clean, upper, log, n_upper
 
 
+STAR_STEPS = [("rows_after_dedup", "pp_dedup"), ("rows_after_null_keys", "pp_keys"),
+              ("rows_after_comment_codes", "pp_codes"), ("rows_detections", "pp_det"),
+              ("rows_after_thinning", "pp_thin")]
+
+
+def star_counts(spark, clean_view, source_view="pp_source"):
+    """Rows per star after every step (0 where a step removed the star completely)."""
+    out = None
+    for col, view in [("rows_raw", source_view)] + STAR_STEPS + [("rows_after_band_groups", clean_view)]:
+        c = spark.sql(f"SELECT auid, COUNT(*) AS {col} FROM {view} WHERE auid IS NOT NULL GROUP BY auid").toPandas()
+        out = c if out is None else out.merge(c, on="auid", how="left")
+    cols = ["rows_raw"] + [c for c, _ in STAR_STEPS] + ["rows_after_band_groups"]
+    out[cols] = out[cols].fillna(0).astype("int64")
+    return out
+
+
 def run(spark, cfg):
     spark.table(cfg.table("observations_raw")).createOrReplaceTempView("pp_source")
     clean, upper, log, n_upper = transform(spark, "pp_source", cfg.settings)
@@ -89,10 +116,15 @@ def run(spark, cfg):
     n_clean = spark.table(cfg.table("obs_clean")).count()
     log.append((f"6 after band normalisation (groups >= {cfg.section('preprocess')['min_group_size']})", n_clean))
 
+    stars = star_counts(spark, cfg.table("obs_clean"))
+    save_hive_table(spark.createDataFrame(stars), cfg, "preprocess_star_log")
+    save_csv(stars, cfg, "preprocess_rows_per_star.csv")
+
     pdf = pd.DataFrame(log, columns=["step", "rows"])
     pdf["removed"] = (pdf["rows"].shift(1) - pdf["rows"]).fillna(0).astype(int)
+    pdf["pct_removed_by_step"] = (100 * pdf["removed"] / pdf["rows"].shift(1)).fillna(0).round(2)
     pdf["pct_of_raw"] = (100 * pdf["rows"] / pdf["rows"].iloc[0]).round(2)
-    pdf.loc[len(pdf)] = ["(side table) fainter-than upper limits kept for cadence", n_upper, 0,
+    pdf.loc[len(pdf)] = ["(side table) fainter-than upper limits kept for cadence", n_upper, 0, 0.0,
                          round(100 * n_upper / pdf["rows"].iloc[0], 2)]
     print(pdf.to_string(index=False))
     save_hive_table(spark.createDataFrame(pdf), cfg, "preprocess_log")

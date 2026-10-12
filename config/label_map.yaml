@@ -1,7 +1,8 @@
 # Per-star binary label from the VSX primary type (text before the first separator below).
 # NR = recurrent nova (e.g. T CrB); UGWZ = WZ Sge-type dwarf nova (e.g. WZ Sge).
 anomalous: [UG, UGSS, UGSU, UGZ, UGWZ, N, NA, NB, NR, NL, ZAND, RCB, FUOR, UV, AM]
-normal:    [M, SRA, SRB, SR, EA, EB, EW, RRAB, RRC, DCEP, CEP, DSCT, BY]
+normal:    [M, SRA, SRB, SR, EA, EB, EW, DPV, RRAB, RRC, DCEP, CEP, DSCT, BY]
+# DPV = double periodic variable (e.g. U Cep, an eclipsing binary)
 # Unlisted types -> excluded from supervised training (kept for K-Means). Every such star is
 # printed and saved to unmatched_vsx_types.csv so nothing is dropped silently.
 # Separators that end the primary type. VSX writes combined types with any of these

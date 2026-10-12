@@ -1,162 +1,131 @@
-"""Step 5 — Classification. Spark MLlib only.
+"""Step 7 — The four ML models (Spark MLlib) on the per-window summary features.
 
-What it does:
-  * Uses only stars with a label (anomalous = 1, normal = 0).
-  * Grouped split BY STAR (auid): 70 % train / 30 % test, stratified by label. The order
-    within each class is a hash of (auid, seed), so the split is reproducible, and the
-    code asserts that no auid is in both sets. (There is one feature row per star, so a
-    row split here is a star split — the assertion makes this explicit.)
-  * Class weights via weightCol: w = n_train / (2 · n_class_train), so the smaller class
-    is not ignored.
-  * Every model is a Pipeline: median Imputer → VectorAssembler → StandardScaler
-    (withMean, withStd) → classifier, FITTED ON THE TRAINING STARS ONLY.
-  * Existing observer-agnostic classifiers on BASELINE features: Gaussian Naive Bayes,
-    Decision Tree, Logistic Regression, Random Forest.
-  * Proposed model: Decision Tree on BASELINE + OBSERVER features. Naive Bayes is also
-    trained with observer features, so both model families are compared symmetrically.
-  * Decision Tree depth from the fixed grid maxDepth ∈ {3, 5}, chosen by cross-validation
-    inside the training stars only.
-  * Metrics on the test stars: precision, recall and F1 for the anomalous class, balanced
-    accuracy ((TPR + TNR) / 2) and the confusion matrix. Plain accuracy is not headlined
-    because the classes can be unbalanced.
-Outputs: `model_metrics.csv`, Hive tables `model_metrics` and `test_predictions`, the
-proposed model's confusion matrix, DT-baseline vs proposed side-by-side, and a grouped
-bar chart of all models.
+What it does, for each of the 5 star-grouped splits (Hive table `splits`, the same splits
+RGA-Net uses) and on the same windows (Hive table `window_features`):
+  * Models: Gaussian Naive Bayes (modelType="gaussian"), Decision Tree, Random Forest and
+    Logistic Regression.
+  * Class weights through weightCol: w = n_train / (2 · n_class_train), counted on the
+    TRAINING windows, so the smaller class is not ignored.
+  * Median imputation and standardisation (StandardScaler, mean and std) are fitted on the
+    training windows only, then applied to validation and test.
+  * Small hyperparameter grids (settings.yaml → classify) are tuned on the VALIDATION windows:
+    the setting with the best validation PR-AUC is kept. Gaussian Naive Bayes has no
+    hyperparameters to tune. The test windows are never used to choose anything.
+  * Run twice: with the observer features (the main comparison) and without them
+    (supplementary table: does the observer information help the ML models?).
+  * Saves every model's predicted probability for the validation and test windows to
+    work/predictions_ml.csv. The threshold choice and all metrics are then computed by
+    the comparison step with the same code as for RGA-Net (cosmic/evaluation.py).
+Outputs: predictions_ml.csv, ml_selected_params.csv (chosen setting and training time per
+model, seed and feature set), Hive table `ml_predictions`.
 
-Why: the research claim is tested by comparing the proposed observer-aware model with
-existing observer-agnostic classifiers under identical conditions (same split, same
-preprocessing, same metrics).
+Why: these are the existing machine-learning baselines RGA-Net is compared against, trained
+on exactly the same samples and splits.
 """
+import itertools
+import os
+import time
+
 import pandas as pd
 from pyspark.ml import Pipeline
 from pyspark.ml.classification import (DecisionTreeClassifier, LogisticRegression, NaiveBayes,
                                        RandomForestClassifier)
-from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 from pyspark.ml.feature import Imputer, StandardScaler, VectorAssembler
-from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+from pyspark.ml.functions import vector_to_array
 from pyspark.sql import functions as F
 
-from . import plots
-from .features import BASELINE, OBSERVER
+from .evaluation import average_precision
 from .spark_session import save_csv, save_hive_table
+from .windows import BASE_FEATURES, OBSERVER_FEATURES
+
+MODELS = ["NB", "DT", "RF", "LR"]
+FEATURE_SETS = {"with_observer": BASE_FEATURES + OBSERVER_FEATURES, "without_observer": BASE_FEATURES}
 
 
-def grouped_split(df, train_fraction, seed):
-    df.createOrReplaceTempView("cls_labelled")
-    s = df.sparkSession.sql(f"""
-        SELECT *, rk <= GREATEST(1, ROUND({train_fraction} * n_class)) AS is_train FROM (
-          SELECT *, ROW_NUMBER() OVER (PARTITION BY label ORDER BY xxhash64(auid, {int(seed)})) AS rk,
-                    COUNT(*) OVER (PARTITION BY label) AS n_class
-          FROM cls_labelled)""")
-    train, test = s.where("is_train"), s.where("NOT is_train")
-    overlap = train.select("auid").intersect(test.select("auid")).count()
-    assert overlap == 0, f"{overlap} stars are in both train and test"
-    counts = train.groupBy("label").count().collect()
-    n_train = sum(r["count"] for r in counts)
-    weights = {r["label"]: n_train / (2.0 * r["count"]) for r in counts}
-    wexpr = F.when(F.col("label") == 1, weights.get(1, 1.0)).otherwise(weights.get(0, 1.0))
-    return train.withColumn("w", wexpr), test.withColumn("w", wexpr), weights
+def grid(name, c):
+    """Candidate settings for one model (list of dicts)."""
+    if name == "NB":
+        return [{}]
+    if name == "DT":
+        return [dict(maxDepth=int(d), minInstancesPerNode=int(m))
+                for d, m in itertools.product(c["dt_max_depth"], c["dt_min_instances"])]
+    if name == "RF":
+        return [dict(numTrees=int(n), maxDepth=int(d)) for n, d in itertools.product(c["rf_num_trees"], c["rf_max_depth"])]
+    return [dict(regParam=float(r), elasticNetParam=float(e))
+            for r, e in itertools.product(c["lr_reg_param"], c["lr_elastic_net"])]
 
 
-def _pipeline(features, clf):
-    imp = [f"{c}_imp" for c in features]
-    return Pipeline(stages=[
-        Imputer(inputCols=features, outputCols=imp, strategy="median"),
-        VectorAssembler(inputCols=imp, outputCol="raw_features"),
-        StandardScaler(inputCol="raw_features", outputCol="features", withMean=True, withStd=True),
-        clf])
-
-
-def make_models(c):
-    seed = int(c["seed"])
+def make(name, params, seed, c):
     base = dict(labelCol="label", featuresCol="features", weightCol="w")
-    nb = lambda: NaiveBayes(modelType="gaussian", **base)
-    dt = lambda: DecisionTreeClassifier(seed=seed, **base)
-    return [
-        ("NB (baseline)", BASELINE, nb(), False, "existing"),
-        ("DT (baseline)", BASELINE, dt(), True, "existing"),
-        ("LR (baseline)", BASELINE, LogisticRegression(regParam=float(c["lr_reg_param"]), maxIter=100, **base), False, "existing"),
-        ("RF (baseline)", BASELINE, RandomForestClassifier(numTrees=int(c["rf_num_trees"]), seed=seed, **base), False, "existing"),
-        ("NB + observer", BASELINE + OBSERVER, nb(), False, "observer-aware"),
-        ("DT + observer (proposed)", BASELINE + OBSERVER, dt(), True, "proposed"),
-    ]
+    if name == "NB":
+        return NaiveBayes(modelType="gaussian", **base)
+    if name == "DT":
+        return DecisionTreeClassifier(seed=seed, **base, **params)
+    if name == "RF":
+        return RandomForestClassifier(seed=seed, **base, **params)
+    return LogisticRegression(maxIter=int(c["lr_max_iter"]), **base, **params)
 
 
-def metrics(pred):
-    r = pred.select(
-        F.sum(((F.col("label") == 1) & (F.col("prediction") == 1)).cast("int")).alias("tp"),
-        F.sum(((F.col("label") == 0) & (F.col("prediction") == 1)).cast("int")).alias("fp"),
-        F.sum(((F.col("label") == 1) & (F.col("prediction") == 0)).cast("int")).alias("fn"),
-        F.sum(((F.col("label") == 0) & (F.col("prediction") == 0)).cast("int")).alias("tn")).first()
-    tp, fp, fn, tn = (int(r[k] or 0) for k in ("tp", "fp", "fn", "tn"))
-    prec = tp / (tp + fp) if tp + fp else float("nan")
-    rec = tp / (tp + fn) if tp + fn else float("nan")
-    f1 = 2 * prec * rec / (prec + rec) if tp and (prec + rec) else 0.0
-    tnr = tn / (tn + fp) if tn + fp else float("nan")
-    return dict(precision=prec, recall=rec, f1=f1, balanced_accuracy=(rec + tnr) / 2,
-                tp=tp, fp=fp, fn=fn, tn=tn)
+def class_weights(train):
+    counts = {int(r["label"]): r["count"] for r in train.groupBy("label").count().collect()}
+    n = sum(counts.values())
+    return {k: n / (2.0 * v) for k, v in counts.items()}
 
 
-def fit_and_score(train, test, models, c):
-    rows, preds, fitted = [], {}, {}
-    for name, feats, clf, tune, family in models:
-        pipe = _pipeline(feats, clf)
-        chosen = ""
-        if tune:
-            grid = ParamGridBuilder().addGrid(clf.maxDepth, [int(d) for d in c["dt_max_depths"]]).build()
-            ev = MulticlassClassificationEvaluator(labelCol="label", metricName="fMeasureByLabel", metricLabel=1.0)
-            cv = CrossValidator(estimator=pipe, estimatorParamMaps=grid, evaluator=ev,
-                                numFolds=int(c["cv_folds"]), seed=int(c["seed"]))
-            cvm = cv.fit(train)
-            model = cvm.bestModel
-            chosen = f"maxDepth={model.stages[-1].getOrDefault('maxDepth')}"
-        else:
-            model = pipe.fit(train)
-        p = model.transform(test)
-        m = metrics(p)
-        rows.append(dict(model=name, family=family, features="baseline + observer" if feats != BASELINE else "baseline",
-                         n_features=len(feats), params=chosen, **m))
-        preds[name] = p.select("auid", "name", "vsx_type", "label", "prediction").withColumn("model", F.lit(name))
-        fitted[name] = model
-    return pd.DataFrame(rows), preds, fitted
+def probs(model, df):
+    out = model.transform(df).select("window_id", "auid", "label", vector_to_array("probability")[1].alias("prob"))
+    return out.toPandas()
 
 
-def run(spark, cfg, seed=None):
-    c = dict(cfg.section("classify"))
-    if seed is not None:
-        c["seed"] = seed
-    labelled = spark.table(cfg.table("star_features")).where("label IS NOT NULL")
-    train, test, weights = grouped_split(labelled, float(c["train_fraction"]), int(c["seed"]))
-    train.cache(); test.cache()
-    split = pd.DataFrame([dict(seed=int(c["seed"]), train_stars=train.count(), test_stars=test.count(),
-                               train_anomalous=train.where("label = 1").count(),
-                               test_anomalous=test.where("label = 1").count(),
-                               weight_anomalous=weights.get(1), weight_normal=weights.get(0),
-                               auid_overlap=0)])
-    print(split.to_string(index=False))
-    save_csv(split, cfg, "split_summary.csv")
-    save_csv(pd.concat([train.select("auid", "name", "label").toPandas().assign(set="train"),
-                        test.select("auid", "name", "label").toPandas().assign(set="test")]),
-             cfg, "split_stars.csv")
+def run(spark, cfg):
+    seeds = [int(s) for s in cfg.section("split")["seeds"]]
+    pred, chosen = fit_predict(spark.table(cfg.table("window_features")), spark.table(cfg.table("splits")),
+                               cfg.section("classify"), seeds)
+    pred.to_csv(os.path.join(cfg.work_dir, "predictions_ml.csv"), index=False)
+    save_csv(pred, cfg, "predictions_ml.csv")
+    save_hive_table(spark.createDataFrame(pred), cfg, "ml_predictions")
+    save_csv(chosen, cfg, "ml_selected_params.csv")
+    return pred
 
-    res, preds, _ = fit_and_score(train, test, make_models(c), c)
-    res.insert(0, "seed", int(c["seed"]))
-    pd.set_option("display.width", 200)
-    print(res.to_string(index=False))
-    save_csv(res, cfg, "model_metrics.csv")
-    save_hive_table(spark.createDataFrame(res), cfg, "model_metrics")
-    allp = None
-    for p in preds.values():
-        allp = p if allp is None else allp.unionByName(p)
-    save_hive_table(allp, cfg, "test_predictions")
 
-    prop = res[res["family"] == "proposed"].iloc[0]
-    save_csv(res[res["family"] == "proposed"], cfg, "proposed_model_metrics.csv")
-    cm = lambda r: [[r["tn"], r["fp"]], [r["fn"], r["tp"]]]
-    dtb = res[res["model"] == "DT (baseline)"].iloc[0]
-    plots.confusion(cm(prop), f"Proposed: DT + observer features<br>(test stars, seed {c['seed']})",
-                    cfg.output_dir, "fig_confusion_proposed")
-    plots.confusion_side_by_side(cm(dtb), "DT, baseline features", cm(prop), "DT + observer features (proposed)",
-                                 cfg.output_dir, "fig_confusion_dt_vs_proposed")
-    plots.grouped_metrics(res, cfg.output_dir)
-    return res
+def fit_predict(window_features, splits, c, seeds):
+    """Fit, tune on validation and predict, for every seed, feature set and model. Returns (predictions, chosen)."""
+    feats = window_features.where("label IS NOT NULL").withColumn("label", F.col("label").cast("double"))
+    preds, chosen = [], []
+    for seed in seeds:
+        d = feats.join(splits.where(F.col("seed") == seed).select("auid", "set"), "auid")
+        w = class_weights(d.where("set = 'train'"))
+        d = d.withColumn("w", F.when(F.col("label") == 1.0, w.get(1, 1.0)).otherwise(w.get(0, 1.0))).cache()
+        for fs_name, cols in FEATURE_SETS.items():
+            imp = [f"{x}_imp" for x in cols]
+            prep = Pipeline(stages=[Imputer(inputCols=cols, outputCols=imp, strategy="median"),
+                                    VectorAssembler(inputCols=imp, outputCol="raw_features"),
+                                    StandardScaler(inputCol="raw_features", outputCol="features",
+                                                   withMean=True, withStd=True)]).fit(d.where("set = 'train'"))
+            X = prep.transform(d).select("window_id", "auid", "label", "w", "set", "features").cache()
+            tr, va, te = (X.where(f"set = '{s}'") for s in ("train", "val", "test"))
+            for name in MODELS:
+                best, tune_t = None, 0.0
+                for params in grid(name, c):
+                    t0 = time.time()
+                    m = make(name, params, seed, c).fit(tr)
+                    fit_t = time.time() - t0
+                    tune_t += fit_t
+                    pv = probs(m, va)
+                    ap = average_precision(pv["label"], pv["prob"])
+                    if best is None or ap > best[0]:
+                        best = (ap, params, m, fit_t, pv)
+                ap, params, m, fit_t, pv = best
+                pt = probs(m, te)
+                for s, p in (("val", pv), ("test", pt)):
+                    preds.append(p.assign(model=name, variant=fs_name, seed=seed, set=s))
+                chosen.append(dict(model=name, variant=fs_name, seed=seed, params=str(params) if params else "(none)",
+                                   val_pr_auc=ap, fit_seconds=round(fit_t, 2), tuning_seconds=round(tune_t, 2),
+                                   n_train=tr.count(), weight_anomalous=w.get(1), weight_normal=w.get(0)))
+                print(f"seed {seed} {fs_name:16s} {name}: {chosen[-1]['params']}  val PR-AUC {ap:.3f}  "
+                      f"fit {fit_t:.1f} s")
+            X.unpersist()
+        d.unpersist()
+    pred = pd.concat(preds, ignore_index=True)[["model", "variant", "seed", "set", "window_id", "auid", "label", "prob"]]
+    pred["label"] = pred["label"].astype(int)
+    return pred, pd.DataFrame(chosen)

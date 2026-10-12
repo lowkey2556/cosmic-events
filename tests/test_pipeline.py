@@ -126,7 +126,7 @@ def test_comment_with_line_break_stays_one_record(spark, tmp_path):
     f.write_text(",".join(RAW_COLUMNS) + "\n"
                  + '1,T CrB,000-BBW-825,2460702.946285,10.1,0.01,False,V,CCD,SCMA,,,,,,,,,"line one\r\nline two"\n'
                  + "2,T CrB,000-BBW-825,2460702.95,10.2,0.01,False,V,CCD,SCMA,,,,,,,,,\n", newline="")
-    rows = read_raw(spark, "file://" + str(f)).collect()
+    rows = read_raw(spark, f.as_uri()).collect()
     assert len(rows) == 2 and rows[0]["comments"].startswith("line one") and rows[1]["jd"] == "2460702.95"
 
 
@@ -216,29 +216,277 @@ def test_lomb_scargle_inside_spark(spark):
     assert out.loc["B", "ls_period"] == pytest.approx(50.0, rel=0.03)
 
 
-# ---------------------------------------------------------------- classification
-def test_grouped_split_by_star(spark):
-    from cosmic.classify import grouped_split
-    pdf = pd.DataFrame({"auid": [f"S{i:02d}" for i in range(40)], "label": [i % 2 for i in range(40)],
-                        "x": np.arange(40.0)})
-    tr, te, w = grouped_split(spark.createDataFrame(pdf), 0.7, 42)
-    a, b = set(tr.toPandas().auid), set(te.toPandas().auid)
-    assert not a & b and len(a | b) == 40
-    assert tr.where("label = 1").count() == 14 and tr.where("label = 0").count() == 14
-    tr2, _, _ = grouped_split(spark.createDataFrame(pdf), 0.7, 42)
-    assert set(tr2.toPandas().auid) == a            # reproducible for a fixed seed
-    assert w[0] == pytest.approx(1.0) and w[1] == pytest.approx(1.0)
+# ---------------------------------------------------------------- splits and metrics (shared by all models)
+def test_star_split_disjoint_stratified_reproducible():
+    from cosmic.splits import check_disjoint, make_splits
+    stars = pd.DataFrame({"auid": [f"S{i:02d}" for i in range(57)], "label": [int(i < 31) for i in range(57)]})
+    sp = make_splits(stars, [1, 2, 3, 4, 5])
+    check_disjoint(sp)
+    for seed, d in sp.groupby("seed"):
+        assert len(d) == 57 and d["auid"].is_unique                   # every star in exactly one set
+        c = d.groupby(["set", "label"]).size()
+        assert c[("train", 1)] == 22 and c[("val", 1)] == 5 and c[("test", 1)] == 4
+        assert c[("train", 0)] == 18 and c[("val", 0)] == 4 and c[("test", 0)] == 4
+    assert sp[sp.seed == 1].equals(make_splits(stars, [1]))            # reproducible
+    tests = {s: set(d.loc[d["set"] == "test", "auid"]) for s, d in sp.groupby("seed")}
+    assert len({frozenset(v) for v in tests.values()}) == 5             # 5 different splits
 
 
-def test_metrics(spark):
-    from cosmic.classify import metrics
-    p = spark.createDataFrame(pd.DataFrame({"label": [1, 1, 1, 0, 0, 0, 0], "prediction": [1.0, 1, 0, 0, 0, 0, 1]}))
-    m = metrics(p)
+def test_metrics_by_hand():
+    from cosmic.evaluation import at_threshold, average_precision, choose_threshold, roc_auc
+    y = np.array([1, 1, 1, 0, 0, 0, 0])
+    p = np.array([0.9, 0.8, 0.3, 0.4, 0.2, 0.1, 0.85])
+    # positives beat 4, 3 and 2 of the 4 negatives -> AUC = 9 / 12
+    assert roc_auc(y, p) == pytest.approx(9 / 12)
+    # sorted: .9(+) .85(-) .8(+) .4(-) .3(+) ... -> AP = 1/3*1 + 1/3*(2/3) + 1/3*(3/5)
+    assert average_precision(y, p) == pytest.approx((1 + 2 / 3 + 3 / 5) / 3)
+    m = at_threshold(y, p, 0.5)
     assert (m["tp"], m["fn"], m["tn"], m["fp"]) == (2, 1, 3, 1)
-    assert m["precision"] == pytest.approx(2 / 3)
-    assert m["recall"] == pytest.approx(2 / 3)
     assert m["balanced_accuracy"] == pytest.approx((2 / 3 + 3 / 4) / 2)
+    assert roc_auc([1, 0], [0.7, 0.7]) == pytest.approx(0.5) and math.isnan(roc_auc([1, 1], [0.1, 0.2]))
+    assert choose_threshold([1, 1, 0, 0], [0.9, 0.6, 0.5, 0.1]) == pytest.approx(0.6)
+    try:  # cross-check with scikit-learn when it is installed (it is on Colab)
+        from sklearn.metrics import average_precision_score, roc_auc_score
+        r = np.random.default_rng(0)
+        yy, pp = r.integers(0, 2, 300), np.round(r.random(300), 2)   # rounding creates ties
+        assert roc_auc(yy, pp) == pytest.approx(roc_auc_score(yy, pp))
+        assert average_precision(yy, pp) == pytest.approx(average_precision_score(yy, pp))
+    except ImportError:
+        pass
 
+
+def test_threshold_comes_from_validation_only():
+    from cosmic.evaluation import evaluate
+    r = np.random.default_rng(1)
+    val = pd.DataFrame({"set": "val", "auid": [f"V{i % 6}" for i in range(60)], "label": [i % 6 % 2 for i in range(60)]})
+    val["prob"] = np.clip(0.3 * val["label"] + r.random(60) * 0.7, 0, 1)
+    test = pd.DataFrame({"set": "test", "auid": [f"T{i % 6}" for i in range(60)], "label": [i % 6 % 2 for i in range(60)],
+                         "prob": r.random(60)})
+    a = evaluate(pd.concat([val, test]))
+    flipped = test.assign(label=1 - test["label"])
+    b = evaluate(pd.concat([val, flipped]))
+    assert a["window"]["threshold"] == b["window"]["threshold"]           # test labels never move the threshold
+    assert a["star"]["threshold"] == b["star"]["threshold"]
+    assert a["window"]["n_test"] == 60 and a["star"]["n_test"] == 6
+
+
+# ---------------------------------------------------------------- windowing
+def test_window_membership_formula_matches_window_counts():
+    from cosmic.windowing import window_counts, window_ks
+    r = np.random.default_rng(2)
+    dt = np.sort(r.uniform(0, 731, 3000)); dt[0] = 0.0
+    dt = np.r_[dt, [50.0, 100.0, 150.0, 99.999999]]   # exact window edges
+    dt.sort()
+    starts, counts = window_counts(dt, 100, 50)
+    from collections import Counter
+    c = Counter(k for x in dt for k in window_ks(x, 100, 50))
+    assert [c.get(k, 0) for k in range(len(starts))] == list(counts)
+    with pytest.raises(ValueError):
+        window_ks(10.0, 50, 100)                          # stride > length is refused
+
+
+def test_build_sequence_subsample_pad_and_gaps():
+    from cosmic.windows import build_sequence, vocab
+    n = 7
+    pdf = pd.DataFrame({"window_id": "A#0000", "t_days": [5.0, 0.0, 1.0, 3.0, 3.0, 10.0, 20.0],
+                        "mag_norm": np.arange(n, dtype=float), "uncertainty": [0.1, np.nan, 0.2, 0.3, np.nan, 0.1, 0.1],
+                        "a_k": 0.5, "obs_offset": 0.0, "band_idx": 2, "type_idx": 3})
+    pad = build_sequence(pdf, 10).iloc[0]
+    assert pad["seq_len"] == 7 and pad["n_obs"] == 7 and len(pad["mag_norm"]) == 10
+    assert pad["t_days"][:7] == sorted(pdf["t_days"]) and pad["t_days"][7:] == [0.0, 0.0, 0.0]
+    assert pad["logdt"][0] == 0.0 and pad["logdt"][1] == pytest.approx(np.log1p(1.0))
+    assert sum(pad["unc_missing"]) == 2
+    sub = build_sequence(pdf, 4).iloc[0]
+    assert sub["seq_len"] == 4 and sub["n_obs"] == 7
+    assert sub["t_days"][0] == 0.0 and sub["t_days"][-1] == 20.0     # first and last kept
+    assert vocab(pd.DataFrame({"value": ["V", "Vis.", "B"], "n": [5, 9, 1]}), 2) == {"Vis.": 2, "V": 3}
+
+
+class _ViewCfg:
+    """Minimal stand-in for Config in local-mode Spark tests: tables are temp views named t_<table>."""
+
+    def __init__(self, settings, overrides=None):
+        import copy
+        self.settings = copy.deepcopy(settings)
+        for (sec, key), v in (overrides or {}).items():
+            self.settings[sec][key] = v
+
+    def table(self, name):
+        return f"t_{name}"
+
+    def section(self, name):
+        return self.settings[name]
+
+
+@pytest.fixture(scope="module")
+def windowed(spark, clean_views, scored, settings, synth_dir):
+    from cosmic.labels import assign_labels
+    from cosmic.windows import assign_windows, window_features, window_sequences
+    pdf, _, _ = scored
+    spark.table("t_clean").createOrReplaceTempView("t_obs_clean")
+    spark.createDataFrame(pdf[["observer", "score", "low_n", "median_residual"]]).createOrReplaceTempView("t_observer_scores")
+    vsx = pd.read_csv(os.path.join(synth_dir, "labels", "vsx_labels.csv"))
+    stars = vsx[["auid"]].assign(data_name=vsx["name"])
+    lab, _ = assign_labels(stars, vsx, {"anomalous": ["UGSS", "UGSU", "UGZ", "ZAND"], "normal": ["M", "SRB", "SRA"]},
+                           settings["ingest"]["dec_band_edges"])
+    spark.createDataFrame(lab.astype(object).where(lab.notna(), None),
+                          "auid STRING, data_name STRING, name STRING, ra DOUBLE, dec DOUBLE, vsx_type STRING, "
+                          "primary_type STRING, label INT, sky_region STRING").createOrReplaceTempView("t_star_labels")
+    cfg = _ViewCfg(settings, {("windows", "seq_len"): 32})
+    vb, vt = assign_windows(spark, cfg)
+    feats = window_features(spark, cfg).toPandas()
+    seqs = window_sequences(spark, cfg).toPandas()
+    w_obs = spark.table("w_obs").select("auid", "jd", "window_id", "k", "t_days").toPandas()
+    clean = spark.table("t_clean").select("auid", "jd").toPandas()
+    return dict(feats=feats, seqs=seqs, w_obs=w_obs, clean=clean, cfg=cfg, vb=vb)
+
+
+def test_spark_windows_match_the_window_rule(windowed):
+    from cosmic.windowing import count_windows
+    w = windowed["cfg"].section("windows")
+    feats, clean = windowed["feats"], windowed["clean"]
+    got = feats.groupby("auid").size()
+    for auid, d in clean.groupby("auid"):
+        want = count_windows(d["jd"], w["length_days"], w["stride_days"], w["min_obs"])
+        assert got.get(auid, 0) == want, auid
+    assert (feats["n_obs"] >= w["min_obs"]).all()
+    wo = windowed["w_obs"]
+    assert ((wo["t_days"] >= 0) & (wo["t_days"] < w["length_days"])).all()
+    assert feats["window_id"].is_unique and feats["label"].notna().any()
+    assert ((feats["w_a"] > 0) & (feats["w_a"] <= 1)).all()
+
+
+def test_spark_sequences(windowed):
+    seqs, feats = windowed["seqs"].set_index("window_id"), windowed["feats"].set_index("window_id")
+    assert set(seqs.index) == set(feats.index)
+    assert (seqs["seq_len"] == np.minimum(seqs["n_obs"], 32)).all()
+    assert (seqs["n_obs"] == feats.loc[seqs.index, "n_obs"].astype(int)).all()
+    assert seqs["mag_norm"].map(len).eq(32).all()
+    t = seqs.iloc[0]["t_days"][:seqs.iloc[0]["seq_len"]]
+    assert list(t) == sorted(t)
+
+
+def test_classify_fit_predict_on_windows(spark, windowed):
+    from cosmic.classify import fit_predict
+    from cosmic.splits import make_splits
+    feats = windowed["feats"]
+    lab = feats.dropna(subset=["label"]).drop_duplicates("auid")[["auid", "label"]].astype({"label": int})
+    sp = make_splits(lab, [1])
+    c = dict(dt_max_depth=[3], dt_min_instances=[1], rf_num_trees=[10], rf_max_depth=[3], lr_reg_param=[0.01],
+             lr_elastic_net=[0.0], lr_max_iter=50)
+    pred, chosen = fit_predict(spark.createDataFrame(feats.astype(object).where(feats.notna(), None)),
+                               spark.createDataFrame(sp), c, [1])
+    assert set(pred["model"]) == {"NB", "DT", "RF", "LR"} and set(pred["set"]) == {"val", "test"}
+    assert set(pred["variant"]) == {"with_observer", "without_observer"}
+    assert pred["prob"].between(0, 1).all()
+    test_stars = set(sp.loc[sp["set"] == "test", "auid"])
+    assert set(pred.loc[pred["set"] == "test", "auid"]) <= test_stars     # only test stars in the test predictions
+    assert len(chosen) == 8
+
+
+# ---------------------------------------------------------------- RGA-Net (PyTorch, synthetic tensors only)
+def _toy_windows(tmp_path, n_stars=24, per_star=6, L=24, seed=0):
+    """Synthetic token tensors for tests: anomalous windows have one bright excursion."""
+    import json
+    r = np.random.default_rng(seed)
+    N = n_stars * per_star
+    label = np.repeat(np.arange(n_stars) % 2, per_star)
+    t = np.sort(r.uniform(0, 100, (N, L)), axis=1)
+    mag = r.normal(0, 0.1, (N, L)) - 1.5 * label[:, None] * (np.abs(t - 50) < 8)
+    a = r.uniform(0.2, 1.0, (N, L))
+    num = np.stack([mag, t, np.log1p(np.diff(t, prepend=t[:, :1], axis=1)), np.full((N, L), 0.1),
+                    np.zeros((N, L)), a, np.zeros((N, L))], -1).astype(np.float32)
+    mask = np.ones((N, L), bool); mask[:, -4:] = False
+    np.savez_compressed(tmp_path / "windows_seq.npz", num=num, mask=mask, band=np.full((N, L), 2), otype=np.full((N, L), 2),
+                        label=label, window_id=np.array([f"S{i // per_star:02d}#{i % per_star:04d}" for i in range(N)]),
+                        auid=np.array([f"S{i // per_star:02d}" for i in range(N)]),
+                        feature_names=np.array(["mag_norm", "t_days", "logdt", "unc", "unc_missing", "a_k", "obs_offset"]))
+    (tmp_path / "vocab.json").write_text(json.dumps(dict(n_band=4, n_type=4)))
+    from cosmic.splits import make_splits
+    stars = pd.DataFrame({"auid": [f"S{i:02d}" for i in range(n_stars)], "label": np.arange(n_stars) % 2})
+    make_splits(stars, [1, 2]).to_csv(tmp_path / "splits.csv", index=False)
+
+
+def test_reliability_gate_shifts_attention():
+    import torch
+    from cosmic.rganet import GatedSelfAttention
+    torch.manual_seed(0)
+    att = GatedSelfAttention(8, 2, 0.0, gate=True, lambda_init=5.0)
+    x = torch.randn(1, 4, 8)
+    mask = torch.tensor([[True, True, True, False]])
+    log_a = torch.log(torch.tensor([[0.9, 0.01, 0.5, 0.9]]) + 1e-3)
+    B, L, d = x.shape
+    q, k, v = att.qkv(x).view(B, L, 3, 2, 4).permute(2, 0, 3, 1, 4)
+    s = q @ k.transpose(-1, -2) / 2.0 + att.lam() * log_a[:, None, None, :]
+    w = torch.softmax(s.masked_fill(~mask[:, None, None, :], float("-inf")), -1)
+    assert torch.all(w[..., 3] == 0)                                    # padding gets no attention
+    assert torch.all(w[..., 0] > w[..., 1])                             # reliable observer outweighs unreliable one
+    assert float(att.lam().detach()) > 0
+    att.forward(x, mask, log_a)                                         # runs
+
+
+def test_rganet_trains_and_ablations_run(tmp_path):
+    import torch
+    from cosmic.config import load_config
+    from cosmic.rganet import load_windows, train_one
+    _toy_windows(tmp_path)
+    data = load_windows(str(tmp_path))
+    split = pd.read_csv(tmp_path / "splits.csv").query("seed == 1")
+    p = dict(load_config("synthetic").section("rganet"), d_model=16, heads=2, layers=1, max_epochs=6, patience=3,
+             batch_size=16)
+    res = {}
+    for v in ("full", "no_gate", "observer_blind"):
+        pred, hist, info = train_one(data, split, v, 1, p, torch.device("cpu"), log=lambda *_: None)
+        res[v] = (pred, hist, info)
+        assert set(pred["set"]) == {"val", "test"} and pred["prob"].between(0, 1).all()
+        assert 1 <= info["best_epoch"] <= len(hist) <= 6
+        test_stars = set(split.loc[split["set"] == "test", "auid"])
+        assert set(pred.loc[pred["set"] == "test", "auid"]) == test_stars
+    assert res["full"][2]["lambda_layer1"] > 0 and res["no_gate"][2]["lambda_layer1"] == 0
+    assert res["observer_blind"][2]["parameters"] < res["no_gate"][2]["parameters"]   # 2 fewer token inputs
+    pred2, _, _ = train_one(data, split, "full", 1, p, torch.device("cpu"), log=lambda *_: None)
+    assert np.allclose(pred2["prob"], res["full"][0]["prob"], atol=1e-5)               # fixed seed: reproducible
+
+
+def test_compare_end_to_end_on_synthetic_predictions(tmp_path):
+    """Synthetic predictions in a temporary folder only: checks every table, figure and COMPARISON.md is produced."""
+    from cosmic import compare
+    from cosmic.config import load_config
+    r = np.random.default_rng(3)
+    rows = []
+    for seed in (1, 2, 3):
+        for s, n in (("val", 40), ("test", 40)):
+            auid = np.array([f"{s}{seed}_{i % 8}" for i in range(n)]); y = (np.arange(n) % 8 < 4).astype(int)
+            for model, variant in [("RGA-Net", "full"), ("RGA-Net", "no_gate"), ("RGA-Net", "observer_blind"),
+                                   *[(m, v) for m in ("NB", "DT", "RF", "LR") for v in ("with_observer", "without_observer")]]:
+                rows.append(pd.DataFrame(dict(model=model, variant=variant, seed=seed, set=s, auid=auid,
+                                              window_id=[f"{a}#{i}" for i, a in enumerate(auid)], label=y,
+                                              prob=np.clip(0.4 * y + r.random(n) * 0.6, 0, 1))))
+    pred = pd.concat(rows)
+    cfg = load_config("synthetic", [f"datasets.synthetic.output_subdir={tmp_path / 'out'}"])
+    work = cfg.work_dir
+    pred[pred.model == "RGA-Net"].to_csv(os.path.join(work, "predictions_rganet.csv"), index=False)
+    pred[pred.model != "RGA-Net"].to_csv(os.path.join(work, "predictions_ml.csv"), index=False)
+    pd.DataFrame([dict(variant=v, seed=s, train_seconds=10.0 + s, lambda_layer1=0.5, lambda_pool=0.7)
+                  for v in ("full", "no_gate", "observer_blind") for s in (1, 2, 3)]).to_csv(
+        os.path.join(work, "rganet_runs.csv"), index=False)
+    pd.DataFrame([dict(epoch=e, train_loss=1 / e, val_loss=1.2 / e, val_pr_auc=0.5 + e / 100, seed=s, variant="full")
+                  for s in (1, 2, 3) for e in range(1, 6)]).to_csv(os.path.join(work, "rganet_history.csv"), index=False)
+    pd.DataFrame([dict(model=m, variant=v, seed=s, fit_seconds=2.0) for m in ("NB", "DT", "RF", "LR")
+                  for v in ("with_observer", "without_observer") for s in (1, 2, 3)]).to_csv(
+        os.path.join(cfg.output_dir, "ml_selected_params.csv"), index=False)
+    cfg.settings["split"]["curves_seed"] = 1
+    comp = compare.run(cfg)
+    assert list(comp["model"]) == ["RGA-Net", "NB", "DT", "RF", "LR"]
+    out = cfg.output_dir
+    for f in ("comparison_table.csv", "comparison_table_star_level.csv", "ablation_table.csv",
+              "ml_observer_features_table.csv", "metrics_per_seed.csv", "COMPARISON.md",
+              "fig_comparison_metrics.html", "fig_roc_pr_curves.html", "fig_confusion_matrices.html",
+              "fig_rganet_training_curves.html", "fig_ablation.html"):
+        assert os.path.exists(os.path.join(out, f)), f
+    md = open(os.path.join(out, "COMPARISON.md"), encoding="utf-8").read()
+    assert "seed-to-seed spread" in md and "RGA-Net" in md
+    assert "review2" not in out.replace("\\", "/").split("/")
 
 
 # ---------------------------------------------------------------- dataset audit (synthetic, no Spark)
@@ -331,3 +579,44 @@ def test_architecture_dot_has_windowing_and_rganet():
     from cosmic.architecture import dot_source
     src = dot_source()
     assert src.startswith("digraph") and "windowing" in src and "RGA-Net" in src and "PyTorch" in src
+
+
+def test_star_attrition_explains_every_star(spark, windowed, typed_view):
+    from cosmic.preprocess import star_counts
+    from cosmic.splits import make_splits
+    from cosmic.windows import star_attrition
+    spark.createDataFrame(star_counts(spark, "t_clean", source_view=typed_view)).createOrReplaceTempView("t_preprocess_star_log")
+    spark.table(typed_view).createOrReplaceTempView("t_observations_raw")
+    feats = windowed["feats"]
+    per_star = feats.groupby("auid").size().rename("windows").reset_index()
+    lab = feats.dropna(subset=["label"]).drop_duplicates("auid")[["auid", "label"]].astype({"label": int})
+    att = star_attrition(spark, windowed["cfg"], per_star, make_splits(lab, [1]))
+    raw_stars = {r[0] for r in spark.sql(f"SELECT DISTINCT auid FROM {typed_view}").collect()}
+    assert set(att["auid"]) == raw_stars                                    # every raw star is listed
+    used = att[att["status"] == "used"]
+    assert set(used["auid"]) == set(lab["auid"]) and used["set_first_seed"].notna().all()
+    assert (att.loc[att["status"] != "used", "reason"] != "").all()          # every unused star has a reason
+    assert att["reason"].str.startswith("unlabelled").sum() >= 2             # the synthetic unlisted types
+    cols = [c for c in att.columns if c.startswith("rows_")]
+    assert (att[cols].diff(axis=1).iloc[:, 1:] <= 0).all().all()             # counts never grow step to step
+
+
+def test_own_folders_are_never_read_as_data(tmp_path, monkeypatch):
+    from cosmic.config import load_config
+    from cosmic.rawfiles import RAW_COLUMNS, discover
+    monkeypatch.delenv("COSMIC_DATA_ROOT", raising=False)
+    good = ",".join(RAW_COLUMNS) + "\n1,SS CYG,000-BCP-220,2460676.6,12.5,0.05,False,V,CCD,ABC,,,,,,,,,\n"
+    for rel in ("raw/a.csv", "existing/b.csv", "outputs/review2/audit_files.csv", "labels/vsx_labels.csv",
+                "work/splits.csv"):
+        _write(str(tmp_path / rel), good)
+    cfg = load_config("real", [f"datasets.real.root={tmp_path}", f"datasets.real.data_root={tmp_path}"])
+    _, files, skipped = discover(cfg)
+    rel = sorted(os.path.relpath(f, tmp_path).replace(os.sep, "/") for f in files)
+    assert rel == ["existing/b.csv", "raw/a.csv"] and skipped == []
+
+
+def test_underscore_and_padded_names():
+    from cosmic.labels import norm_name, vsx_name_candidates
+    assert vsx_name_candidates("DY_PEG")[0] == "DY Peg"
+    assert vsx_name_candidates("V603_AQL")[0] == "V0603 Aql"
+    assert norm_name("DY_PEG") == norm_name("DY Peg")

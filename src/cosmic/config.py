@@ -60,6 +60,14 @@ class Config:
         return self._abs(path) if path else os.path.join(self.root, self.settings["paths"]["raw_subdir"])
 
     @property
+    def work_dir(self):
+        """<root>/work (real) or synthetic_run/work: intermediate files that must survive a Colab reset."""
+        base = self.root if self.dataset == "real" else self.output_dir
+        path = os.path.join(base, self.settings["paths"].get("work_subdir", "work"))
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @property
     def labels_file(self):
         return os.path.join(self.root, self.settings["paths"]["labels_file"])
 
@@ -96,13 +104,13 @@ class Config:
         return os.path.join(REPO_ROOT, rel)
 
     def load_yaml(self, key):
-        with open(self.repo_path(self.settings["paths"][key])) as fh:
+        with open(self.repo_path(self.settings["paths"][key]), encoding="utf-8") as fh:
             return yaml.safe_load(fh)
 
 
 def load_config(dataset="real", overrides=None, path=None):
     path = path or os.path.join(REPO_ROOT, "config", "settings.yaml")
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         settings = yaml.safe_load(fh)
     settings = apply_overrides(settings, overrides)
     if dataset not in settings["datasets"]:

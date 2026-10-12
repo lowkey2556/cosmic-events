@@ -59,7 +59,7 @@ bash setup/smoke_tests.sh 4   # Hive metastore: CREATE TABLE + LOAD + SELECT thr
 bash setup/smoke_tests.sh 5   # PySpark on YARN writes smoke.spark_written; Hive CLI reads it
 
 # 4. Pipeline
-python run.py milestone1 --data real
+python run.py all --data real
 ```
 
 ## Problems found while testing, and how the scripts handle them
@@ -78,7 +78,7 @@ On 2026-10-11, on the WSL test machine (non-root, 3.7 GB RAM, YARN 2 GB), these 
 - `install_stack.sh` and `start_stack.sh` completed; the start took about 1 minute.
 - Smoke tests 1–5 all passed.
 - `pytest` passed 11 of 11 tests.
-- `python run.py milestone1 --data synthetic` ran all six steps on YARN, with every table readable from the Hive CLI.
+- `python run.py all --data synthetic` ran the Spark steps on YARN, with every table readable from the Hive CLI.
 
 None of this used real data, and none of it produced Review 2 outputs.
 
@@ -109,7 +109,7 @@ the script is not root. On Colab (root), Java always comes from apt.
 ```bash
 PYTHON=~/cosmic_venv/bin/python CACHE_DIR=~/cosmic_cache bash setup/install_stack.sh
 bash setup/start_stack.sh && bash setup/smoke_tests.sh all
-python run.py milestone1 --data synthetic --set spark.executor_instances=1 --set spark.executor_memory=512m \
+python run.py all --data synthetic --set spark.executor_instances=1 --set spark.executor_memory=512m \
     --set spark.executor_memory_overhead=384m --set spark.driver_memory=768m
 python -m pytest -q tests
 ```

@@ -8,17 +8,22 @@ import json
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = "/content/drive/MyDrive/cosmic_roja/outputs/review2"
 
 CELLS = [
-    ("md", """# Cosmic Event Crowdsourcing Platform: Milestone 1 (Review 2)
+    ("md", """# Cosmic Event Crowdsourcing Platform: Review 2
 
-A Spark pipeline that detects anomalous celestial events in crowdsourced **AAVSO** variable-star
-observations, using each observer's computed reliability as an explicit classifier feature.
+Detects anomalous (eruptive) variable stars in crowdsourced **AAVSO** observations. The proposed model,
+**RGA-Net** (Reliability-Gated Attention Network), is a small Transformer-style network whose attention is gated
+by each observer's measured reliability. It is compared with four Spark MLlib models on the same windows and
+the same 5 star-grouped splits.
 
-**Stack running inside this Colab VM:** Hadoop 3.3.6 (HDFS + YARN, pseudo-distributed) · Spark 3.5.9 on YARN ·
-Hive 3.1.3 metastore on a Derby network server · Spark SQL · Spark MLlib · PyTorch (deep learning). **Every graph is a Plotly figure**, shown inline and saved as PNG (slides) + interactive HTML. The architecture diagram is drawn with Graphviz.
+**Stack inside this Colab VM:** Hadoop 3.3.6 (HDFS + YARN, pseudo-distributed) · Spark 3.5.9 on YARN · Spark SQL ·
+Hive 3.1.3 metastore · Spark MLlib · PyTorch (RGA-Net only, on the GPU). **Every graph is a Plotly figure**, shown
+inline and saved as PNG (slides) + interactive HTML. The architecture diagram is drawn with Graphviz.
 
-Run top to bottom with **Runtime → Run all**. Outputs are written to `MyDrive/cosmic/outputs/review2/` and shown inline below."""),
+Use a **GPU runtime** (Runtime → Change runtime type → T4 GPU). Step-by-step guide: `docs/COLAB_GUIDE.md`.
+Outputs are written to `MyDrive/cosmic_roja/outputs/review2/` and shown at the end of the notebook."""),
     ("md", "## 0. Mount Google Drive and get the code"),
     ("code", """from google.colab import drive
 drive.mount('/content/drive')"""),
@@ -29,25 +34,32 @@ if not os.path.isdir('/content/cosmic/.git'):
 else:
     !cd "/content/cosmic" && git pull -q
 %cd /content/cosmic
-!git log --oneline | head -15"""),
+!git log --oneline | head -5"""),
     ("md", """### Data folder
 `DATA_ROOT` is the Drive folder that holds the AAVSO CSVs. It is searched recursively (`raw/`, `existing/`, and any
-sub-folder added later). ZIPs, other files and `DOWNLOAD_LOG/` are ignored. Stars are identified by `auid`, never by file name."""),
+sub-folder added later). ZIPs, other files, `DOWNLOAD_LOG/` and the pipeline's own `outputs/`, `labels/` and `work/`
+folders are ignored. Stars are identified by `auid`, never by file name."""),
     ("code", """DATA_ROOT = "/content/drive/MyDrive/cosmic_roja"   # <- contains raw/ (2024) and existing/ (Jan 2025); read recursively
 import os
 os.environ["COSMIC_DATA_ROOT"] = DATA_ROOT        # every `!python run.py ...` below reads this
 assert os.path.isdir(DATA_ROOT), f"Drive folder not found: {DATA_ROOT}"
-!find "$DATA_ROOT" -maxdepth 2 -type d | sort"""),
+!find "$DATA_ROOT" -maxdepth 1 -type d | sort
+# VSX labels fetched earlier into the old cosmic/ folder are reused (copied once), so they are not fetched again
+!mkdir -p "$DATA_ROOT/labels"
+!test -f "$DATA_ROOT/labels/vsx_labels.csv" || cp -v "/content/drive/MyDrive/cosmic/labels/vsx_labels.csv" "$DATA_ROOT/labels/" 2>/dev/null || true"""),
+    ("code", """# GPU check (RGA-Net trains on the GPU if there is one; everything else uses the CPU)
+import torch
+print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "NONE - choose Runtime > Change runtime type > T4 GPU")
+!nproc; free -g | head -2"""),
     ("md", """## Step 0: Dataset audit (plain Python, runs before the Big Data stack)
-Per file and in total: size in MB, rows, stars, observers and date range. The total size gets a PASS/FAIL
-against the 50 MB target, both as stored and after removing observations repeated across overlapping downloads.
-Per star: rows, observers, dates, longest continuous coverage and the number of 100-day windows.
-Class balance, skipped files and unmatched VSX types. (1 MB = 1,048,576 bytes.)"""),
-    ("code", """!pip -q install pyyaml astropy astroquery
+Per file and in total: size in MB, rows, stars, observers and date range; PASS/FAIL against 50 MB, both as stored
+and after removing observations repeated across overlapping downloads; per star: rows, observers, dates, coverage,
+windows; class balance; skipped files; unmatched VSX types. (1 MB = 1,048,576 bytes.)"""),
+    ("code", """!pip -q install pyyaml astropy astroquery "plotly==5.24.1" "kaleido==0.2.1"
 !python run.py audit --data real"""),
     ("md", """## 1. Install the stack
-Java 8 comes from apt. Hadoop, Spark, Hive and Derby tarballs are cached in `MyDrive/cosmic/cache/`, so a reinstall after a Colab reset only extracts them.
-The first run downloads about 1.5 GB."""),
+Java 8 comes from apt. Hadoop, Spark, Hive and Derby tarballs are cached in `MyDrive/cosmic/cache/`, so a reinstall after
+a Colab reset only extracts them. The first run downloads about 1.5 GB."""),
     ("code", """%%time
 !bash setup/install_stack.sh"""),
     ("md", "## 2. Start HDFS, YARN, the Derby network server and the Hive metastore"),
@@ -73,85 +85,114 @@ YARN ResourceManager is on 8088, the HDFS NameNode on 9870, and the Spark UI on 
     ("code", """from google.colab import output
 for port in (8088, 9870):
     output.serve_kernel_port_as_window(port)"""),
-    ("md", "## 4. Raw data in Drive"),
-    ("code", """!find "$DATA_ROOT" -type f -iname '*.csv' -not -path '*/DOWNLOAD_LOG/*' | sort | head -100
-!ls -la "/content/drive/MyDrive/cosmic/labels" 2>/dev/null || echo "no labels file yet - Step 1 will fetch VSX rows from VizieR" """),
-    ("md", "## 5. Architecture diagram (slide 3)"),
+    ("md", "## 4. Architecture diagram"),
     ("code", """!which dot >/dev/null || apt-get -qq install -y graphviz   # Graphviz draws the diagram
 !python run.py architecture --data real"""),
-    ("md", """## 6. Step 1: Ingestion and storage
+    ("md", """## 5. Step 1: Ingestion and storage (HDFS, Spark, Parquet, Hive)
 `hdfs dfs -put` to `/cosmic/raw/` → explicit-schema read → Parquet + Snappy partitioned by `obs_year`/`sky_region` →
-Hive external table `observations_raw` → partition-pruning test → dataset summary."""),
+Hive external table `observations_raw` → VSX labels → partition-pruning test → dataset summary."""),
     ("code", "!python run.py ingest --data real"),
     ("code", """# The raw data in HDFS, and the partitions as Hive itself sees them
-!hdfs dfs -ls -R -h "/cosmic/raw" | head -60
+!hdfs dfs -ls -R -h "/cosmic/raw" | head -40
 !hdfs dfs -du -s -h "/cosmic/raw" "/cosmic/warehouse/observations_raw" "/cosmic/warehouse/observations_flat"
 !hive -S -e "SHOW PARTITIONS cosmic.observations_raw;" 2>/dev/null"""),
-    ("md", "## 7. Step 2: Preprocessing in Spark SQL"),
+    ("md", """## 6. Step 2: Preprocessing in Spark SQL
+Deduplication → null keys → comment codes → fainter-than split → **thinning** (≤ 10 points per observer per star per band
+per night) → band normalisation. Rows are counted after every step, in total and per star."""),
     ("code", "!python run.py preprocess --data real"),
-    ("md", "## 8. Step 3: Observer agreement score"),
+    ("md", "## 7. Step 3: Observer agreement score A_k"),
     ("code", "!python run.py score --data real"),
-    ("md", "## 9. Step 4: Features"),
+    ("md", "## 8. Step 4: Per-star features (used by K-Means)"),
     ("code", "!python run.py features --data real"),
-    ("md", "## 10. Step 5: Classification, one fixed seed"),
-    ("code", "!python run.py classify --data real"),
-    ("md", "## 11. Step 6: K-Means"),
+    ("md", """## 9. Step 5: Windowing in Spark (the samples for every model)
+100-day windows (stride 50 days, ≥ 20 observations) → per-window ML features (Spark SQL + Lomb–Scargle in
+applyInPandas) and RGA-Net token sequences (L = 200) → Parquet on HDFS + Hive tables → 5 star-grouped 70/15/15
+splits → export to `work/windows_seq.npz` for PyTorch. Also writes `star_attrition.csv` (every star: used or not, and why)."""),
+    ("code", "!python run.py windows --data real"),
+    ("code", """# The window tables in Hive
+!hive -S -e "USE cosmic; SHOW TABLES;" 2>/dev/null
+!hive -S -e "SELECT label, COUNT(*) FROM cosmic.window_features GROUP BY label;" 2>/dev/null"""),
+    ("md", "## 10. Step 6: K-Means on per-star features (supporting analysis)"),
     ("code", "!python run.py cluster --data real"),
-    ("code", """# Hive tables produced by the pipeline (listed through the Hive CLI)
-!hive -S -e "USE cosmic; SHOW TABLES;" 2>/dev/null"""),
-    ("md", "# Review 2 deliverables (all from the real data above)"),
-    ("code", """import pandas as pd
-import os
+    ("md", """## 11. Step 7: The four ML models (Spark MLlib) on the windows
+Naive Bayes (gaussian), Decision Tree, Random Forest, Logistic Regression; 5 splits; class weights via `weightCol`;
+scaling fitted on train; grids tuned on validation; with and without observer features."""),
+    ("code", """%%time
+!python run.py classify --data real"""),
+    ("md", """## 12. Step 8: RGA-Net and its ablations (PyTorch, GPU)
+Full model, no-gate (λ = 0) and observer-blind, each on the same 5 splits. Early stopping on validation PR-AUC."""),
+    ("code", """%%time
+!python run.py rganet --data real"""),
+    ("md", "## 13. Step 9: Comparison (tables, figures, COMPARISON.md)"),
+    ("code", "!python run.py compare --data real"),
+    ("md", """## 14. Step 10: Scalability (YARN with 1, 2 and 4 executors, 3 runs each)
+Re-runs preprocessing + windowing 9 times, so it takes a while. Run it last."""),
+    ("code", """%%time
+!python run.py scalability --data real"""),
+    ("md", "# Review 2 results (all from the real data above)"),
+    ("code", f"""import os
+import pandas as pd
 import plotly.io as pio
 from IPython.display import Image, Markdown, display
-OUT = '/content/drive/MyDrive/cosmic/outputs/review2'
-pd.set_option('display.width', 220); pd.set_option('display.max_columns', 30)
+OUT = '{OUT}'
+pd.set_option('display.width', 220); pd.set_option('display.max_columns', 30); pd.set_option('display.max_rows', 120)
 def csv(name, title=None):
-    display(Markdown(f'**{title or name}**')); display(pd.read_csv(f'{OUT}/{name}'))
+    display(Markdown(f'**{{title or name}}**'))
+    path = f'{{OUT}}/{{name}}'
+    display(pd.read_csv(path)) if os.path.exists(path) else display(Markdown(f'*{{name}}: not produced yet*'))
 def fig(name):
     # show a saved Plotly figure inline (interactive); its PNG and HTML copies are next to it in OUT
-    path = f'{OUT}/{name}.json'
-    if os.path.exists(path):
-        pio.read_json(path).show()
-    else:
-        display(Markdown(f'*{name}: not produced yet*'))
+    path = f'{{OUT}}/{{name}}.json'
+    pio.read_json(path).show() if os.path.exists(path) else display(Markdown(f'*{{name}}: not produced yet*'))
 def png(name, width=900):
-    display(Image(f'{OUT}/{name}', width=width))
-if os.path.exists(f'{OUT}/figure_export_log.csv'):
-    log = pd.read_csv(f'{OUT}/figure_export_log.csv')
+    display(Image(f'{{OUT}}/{{name}}', width=width))
+if os.path.exists(f'{{OUT}}/figure_export_log.csv'):
+    log = pd.read_csv(f'{{OUT}}/figure_export_log.csv')
     bad = log[~log['png'].astype(bool)]
-    print('PNG export: all OK' if bad.empty else f'PNG export FAILED for {len(bad)} figures (HTML kept):')
+    print('PNG export: all OK' if bad.empty else f'PNG export FAILED for {{len(bad)}} figures (HTML kept):')
     if not bad.empty: display(bad)"""),
-    ("md", "## Slide 1: Dataset"),
+    ("md", "## Dataset"),
     ("code", """csv('audit_summary.csv', 'Dataset audit: summary (50 MB check)')
-csv('audit_files.csv', 'Dataset audit: per file'); csv('audit_class_balance.csv', 'Class balance')
-csv('audit_skipped_files.csv', 'Skipped files (bad header)'); csv('audit_unmatched_vsx_types.csv', 'Unmatched VSX types')
-csv('dataset_summary.csv', 'Dataset summary')
+csv('dataset_summary.csv', 'Dataset summary after ingestion')
+csv('audit_class_balance.csv', 'Class balance'); csv('audit_skipped_files.csv', 'Skipped files (bad header)')
+csv('audit_unmatched_vsx_types.csv', 'Unmatched VSX types')
 csv('rows_per_band.csv', 'Rows per band'); csv('rows_per_type.csv', 'Rows per observation type')
-csv('label_counts.csv', 'Stars per label')
 fig('fig_obs_per_star')"""),
-    ("md", "## Slide 3: Architecture"),
+    ("md", "## Architecture"),
     ("code", "png('architecture.png', 1100)   # Graphviz PNG (SVG and DOT source saved next to it)"),
-    ("md", "## Slide 5: Preprocessing results"),
-    ("code", """csv('preprocess_row_counts.csv', 'Row counts after each step'); fig('fig_preprocessing_funnel')
+    ("md", "## Preprocessing results"),
+    ("code", """csv('preprocess_row_counts.csv', 'Rows after each step (thinning is step 5)'); fig('fig_preprocessing_funnel')
 csv('partition_pruning.csv', 'Partition pruning: partitioned vs unpartitioned'); fig('fig_partition_pruning')
 csv('lightcurve_star.csv', 'Light-curve star'); fig('fig_lightcurve_before_after')
 csv('observer_score_summary.csv', 'Observer scores: summary'); fig('fig_observer_score_hist')
 csv('observer_top_bottom10.csv', 'Top and bottom 10 observers by agreement score')
 csv('spearman_score_vs_uncertainty.csv', 'Spearman: score vs self-reported uncertainty')"""),
-    ("md", "## Slide 7: Proposed model results"),
-    ("code", """csv('split_summary.csv', 'Split by star (auid)')
-csv('proposed_model_metrics.csv', 'Proposed model (DT + observer features), seed 42')
-fig('fig_confusion_proposed')
-csv('feature_log.csv', 'Feature log')
-csv('kmeans_silhouette.csv', 'K-Means silhouette'); fig('fig_kmeans_silhouette')
-csv('kmeans_crosstab_label.csv', 'Cluster vs label'); csv('kmeans_crosstab_type.csv', 'Cluster vs VSX type')"""),
-    ("md", "## Slide 8: Comparison with existing classifiers"),
-    ("code", """csv('model_metrics.csv', 'All models, same split (seed 42); positive class = anomalous')
-fig('fig_model_comparison')
-fig('fig_confusion_dt_vs_proposed')"""),
-    ("md", """**Caveat:** these are preliminary results from **one seed on a small test set**. Milestone 2 adds the 5-seed robustness (mean ± std)."""),
-    ("code", '!ls -la "/content/drive/MyDrive/cosmic/outputs/review2"'),
+    ("md", "## Windows, splits and star attrition"),
+    ("code", """csv('window_summary.csv', 'Windows'); csv('window_counts_by_class.csv', 'Windows per class')
+csv('window_counts_by_split.csv', 'Windows per split and class (every seed)')
+att = pd.read_csv(f'{OUT}/star_attrition.csv')
+print(att['status'].value_counts().to_string())
+display(att[att['status'] != 'used'][['auid', 'name', 'vsx_type', 'status', 'reason']])"""),
+    ("md", "## Main result: RGA-Net vs the four ML models (5 star-grouped splits)"),
+    ("code", """csv('comparison_table.csv', 'Test windows, mean ± std over 5 splits (positive class = anomalous)')
+csv('comparison_table_star_level.csv', 'Test stars (mean window probability), mean ± std over 5 splits')
+fig('fig_comparison_metrics'); fig('fig_comparison_metrics_star_level')
+fig('fig_roc_pr_curves'); fig('fig_confusion_matrices')"""),
+    ("md", "## RGA-Net: training curves, ablation, learned λ"),
+    ("code", """fig('fig_rganet_training_curves')
+csv('ablation_table.csv', 'Ablation, test windows (mean ± std)'); fig('fig_ablation')
+csv('rganet_learned_lambda.csv', 'Learned gate strengths λ (full model)')"""),
+    ("md", "## Supplementary: ML models with vs without observer features"),
+    ("code", "csv('ml_observer_features_table.csv', 'ML models, test windows (mean ± std)'); csv('ml_selected_params.csv', 'Chosen settings and training time')"),
+    ("md", "## COMPARISON.md (generated from the numbers above)"),
+    ("code", """p = f'{OUT}/COMPARISON.md'
+display(Markdown(open(p, encoding='utf-8').read())) if os.path.exists(p) else print('run the compare step first')"""),
+    ("md", "## Scalability"),
+    ("code", "csv('scalability.csv', 'Preprocessing + windowing through YARN'); fig('fig_scalability')"),
+    ("md", "## Supporting: K-Means"),
+    ("code", """csv('kmeans_silhouette.csv', 'K-Means silhouette'); fig('fig_kmeans_silhouette')
+csv('kmeans_crosstab_label.csv', 'Cluster vs label')"""),
+    ("code", f'!ls -la "{OUT}"'),
 ]
 
 
@@ -165,7 +206,8 @@ def build():
         else:
             cells.append({"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": source})
     nb = {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "name": "python3"},
-                                       "language_info": {"name": "python"}, "colab": {"provenance": []}},
+                                       "language_info": {"name": "python"}, "accelerator": "GPU",
+                                       "colab": {"provenance": [], "gpuType": "T4"}},
           "nbformat": 4, "nbformat_minor": 0}
     path = os.path.join(ROOT, "notebooks", "cosmic_colab.ipynb")
     with open(path, "w", encoding="utf-8", newline="\n") as fh:

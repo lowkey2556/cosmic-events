@@ -12,3 +12,5 @@ plotly==5.24.1
 kaleido==0.2.1
 astropy
 astroquery
+# PyTorch (RGA-Net only) is preinstalled on Colab with CUDA; it is deliberately not pinned here,
+# because reinstalling it would download about 2 GB. Locally: pip install torch

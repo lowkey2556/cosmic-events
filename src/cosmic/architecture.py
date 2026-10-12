@@ -19,20 +19,20 @@ SPARK, STORE, PY, TORCH, VIZ, LATER = "#e8f0fb", "#fdf0e9", "#f3f2ee", "#efeafb"
 
 NODES = [
     # id, tool (bold), what it does, fill
-    ("drive", "Google Drive", "AAVSO CSV exports, one folder per round<br/>+ VSX types (VizieR)", PY),
+    ("drive", "Google Drive", "AAVSO CSV exports (cosmic_roja/raw, existing)<br/>+ VSX types (VizieR)", PY),
     ("audit", "Python — Step 0", "dataset audit: MB, rows, stars,<br/>50 MB check, header check", PY),
-    ("hdfs", "Hadoop HDFS", "/cosmic/raw/&lt;round&gt;/*.csv", STORE),
+    ("hdfs", "Hadoop HDFS", "/cosmic/raw/&lt;sub-folder&gt;/*.csv", STORE),
     ("ingest", "Spark on YARN — Step 1", "explicit-schema read → Parquet + Snappy<br/>partitioned by obs_year / sky_region", SPARK),
     ("prep", "Spark SQL — Step 2", "dedup · null keys · comment codes<br/>upper limits · thinning · band normalisation", SPARK),
     ("score", "Spark SQL — Step 3", "observer agreement score<br/>leave-one-out consensus self-join → A_k", SPARK),
-    ("win", "Spark — windowing", "100-day windows (stride 50 d, ≥ 20 obs)<br/>label + auid per window", SPARK),
+    ("win", "Spark — Step 5 windowing", "100-day windows (stride 50 d, ≥ 20 obs)<br/>label + auid; 5 star-grouped splits", SPARK),
     ("feat", "Spark — window features", "amplitude · moments · Lomb–Scargle<br/>cadence · observer features", SPARK),
-    ("seq", "Spark → Parquet export", "token sequences (L = 200, masked)<br/>mag_norm, Δt, band, type, A_k, offset", SPARK),
-    ("mllib", "Spark MLlib", "Naive Bayes · Decision Tree<br/>Random Forest · Logistic Regression", SPARK),
-    ("rga", "PyTorch (Colab GPU)", "RGA-Net: reliability-gated attention<br/>+ ablations", TORCH),
-    ("cmp", "Comparison", "5 star-grouped splits, same for all models<br/>mean ± std on test stars", PY),
+    ("seq", "Spark → Parquet → npz", "token sequences (L = 200, masked)<br/>mag_norm, Δt, band, type, A_k, offset", SPARK),
+    ("mllib", "Spark MLlib — Step 7", "Naive Bayes · Decision Tree<br/>Random Forest · Logistic Regression", SPARK),
+    ("rga", "PyTorch (Colab GPU) — Step 8", "RGA-Net: reliability-gated attention<br/>+ ablations (no gate, observer-blind)", TORCH),
+    ("cmp", "Comparison — Step 9", "same 5 splits for all models; thresholds<br/>from validation; mean ± std on test", PY),
     ("fig", "Plotly", "tables and figures<br/>PNG + interactive HTML", VIZ),
-    ("hive", "Hive metastore", "observations_raw (external), obs_clean,<br/>observer_scores, windows, metrics", STORE),
+    ("hive", "Hive metastore", "observations_raw (external), obs_clean, observer_scores,<br/>windows, window_features, splits, ml_predictions", STORE),
 ]
 # The second row runs right to left (a "snake" that fits a 16:9 slide): those edges are written
 # reversed with dir=back, so Graphviz places them right-to-left but the arrows still follow the data.

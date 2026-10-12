@@ -27,6 +27,19 @@ def window_counts(jd, length, stride):
     return starts, counts
 
 
+def window_ks(dt, length, stride):
+    """Windows k that contain an observation dt days after the star's first observation.
+
+    k runs from max(0, floor((dt - length) / stride) + 1) to floor(dt / stride); this is the
+    formula the Spark windowing step uses (it needs stride <= length, so the range is never empty).
+    """
+    if stride > length:
+        raise ValueError("windows.stride_days must be <= windows.length_days")
+    lo = max(0, int(np.floor((dt - length) / stride)) + 1)
+    hi = int(np.floor(dt / stride))
+    return [k for k in range(lo, hi + 1) if 0 <= dt - k * stride < length]
+
+
 def count_windows(jd, length, stride, min_obs):
     """Number of windows of one star that hold at least `min_obs` observations."""
     return int((window_counts(jd, length, stride)[1] >= min_obs).sum())

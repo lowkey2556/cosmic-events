@@ -4,9 +4,10 @@
 # Two datasets live side by side and never mix: different HDFS base, Hive database and output folder.
 datasets:
   real:
-    root: /content/drive/MyDrive/cosmic        # Google Drive folder (labels/, cache/, outputs/ live here)
+    root: /content/drive/MyDrive/cosmic_roja   # Drive project folder: labels/, work/ and outputs/review2/ live here
     # Folder holding the AAVSO CSVs, searched recursively (currently raw/ = 2024 files, existing/ = Jan 2025).
-    # null = <root>/raw. The environment variable COSMIC_DATA_ROOT overrides this value.
+    # null = <root>/raw. The environment variable COSMIC_DATA_ROOT overrides this value. The output,
+    # labels and work folders are never scanned for data, even when they sit inside data_root.
     data_root: /content/drive/MyDrive/cosmic_roja
     hdfs_base: /cosmic
     database: cosmic
@@ -21,6 +22,7 @@ datasets:
 paths:
   raw_subdir: raw                              # default data_root = <root>/raw
   labels_file: labels/vsx_labels.csv           # <root>/labels/vsx_labels.csv (VSX rows for our stars)
+  work_subdir: work                            # <root>/work: window tensors exported for PyTorch, predictions
   star_list: config/stars.yaml
   label_map: config/label_map.yaml
 
@@ -52,17 +54,32 @@ audit:
   target_mb: 50                                # Review 2 size target; 1 MB = 1,048,576 bytes
   coverage_max_gap_days: 30                    # "continuous coverage" breaks at any gap longer than this
 
-# Time windows: the samples for both RGA-Net and the ML models.
+# Time windows (Step "windows", Spark): the samples for BOTH RGA-Net and the ML models.
 windows:
   length_days: 100
-  stride_days: 50
+  stride_days: 50                              # must be <= length_days (windows overlap or touch)
   min_obs: 20                                  # windows with fewer observations are dropped
+  seq_len: 200                                 # L: tokens per window for RGA-Net (evenly spaced subsample / padding)
+  max_bands: 12                                # most frequent bands get their own index; the rest share "other"
+  max_obs_types: 6
+  ls_max_points: 2000                          # Lomb-Scargle per window: random subsample cap (fixed seed)
+  ls_seed: 7
+  export_for_pytorch: true                     # write work/windows_seq.npz for RGA-Net (off in scalability runs)
+
+# Star-grouped splits, shared by every model (same 5 splits for RGA-Net and the 4 ML models).
+split:
+  train: 0.70
+  val: 0.15                                    # test = the rest (0.15)
+  seeds: [1, 2, 3, 4, 5]                       # one different split per seed
+  curves_seed: 1                               # the seed used for ROC/PR curves and confusion matrices
 
 preprocess:
   # AAVSO comment codes that mark an observation as unreliable (any letter present -> dropped).
   # B sky bright, U clouds, W poor seeing, L low in sky, Z questionable accuracy, I identification uncertain, S comp-sequence problem
   unreliable_comment_codes: [B, U, W, L, Z, I, S]
-  # Dense CCD time series: keep at most this many points per (star, band, observer, night), evenly spaced.
+  # Thinning dense time series: keep at most this many points per (star, band, observer, night), evenly
+  # spaced in time, so a few CCD observers taking hundreds of points per night cannot dominate.
+  # null or 0 switches thinning off. See docs/PREPROCESSING.md.
   max_obs_per_observer_night: 10
   min_group_size: 20                           # (star, band) groups smaller than this are dropped
 
@@ -79,13 +96,47 @@ features:
   ls_max_points: 20000                         # random subsample cap per star (fixed seed) to bound cost
   ls_seed: 7
 
+# The 4 ML models (Spark MLlib) on per-window summary features. Grids are tuned on the VALIDATION
+# stars only (best validation PR-AUC); the decision threshold is chosen on validation (best F1).
 classify:
-  train_fraction: 0.7
-  seed: 42
-  dt_max_depths: [3, 5]
-  cv_folds: 3
-  rf_num_trees: 100
-  lr_reg_param: 0.01
+  dt_max_depth: [3, 5, 8]
+  dt_min_instances: [1, 10]
+  rf_num_trees: [100]
+  rf_max_depth: [5, 10]
+  lr_reg_param: [0.001, 0.01, 0.1]
+  lr_elastic_net: [0.0]
+  lr_max_iter: 200
+
+# RGA-Net (PyTorch). Small on purpose: we have few stars. Not tuned on test; early stopping and the
+# decision threshold use the validation set only.
+rganet:
+  d_model: 64
+  heads: 4
+  layers: 2
+  ff_mult: 2
+  dropout: 0.2
+  n_time_freqs: 16                             # sinusoidal time encoding: periods log-spaced over...
+  time_min_period_days: 0.1                    # ...0.1 to...
+  time_max_period_days: 1000.0                 # ...1000 days
+  band_emb: 8
+  type_emb: 4
+  lambda_init: 0.0                             # λ = softplus(ρ); ρ starts at this value (softplus(0) = 0.69)
+  eps: 0.001                                   # log(A_j + ε)
+  lr: 0.001
+  weight_decay: 0.01
+  batch_size: 64
+  max_epochs: 80
+  patience: 12                                 # early stopping on validation PR-AUC
+  grad_clip: 1.0
+  variants: [full, no_gate, observer_blind]
+
+# Scalability: Spark preprocessing + windowing through YARN at 1, 2 and 4 executors, 3 runs each.
+scalability:
+  executors: [1, 2, 4]
+  runs: 3
+  executor_memory: 1g                          # identical for every run; small enough that 4 executors fit
+  executor_memory_overhead: 384m
+  executor_cores: 1
 
 kmeans:
   k_min: 2

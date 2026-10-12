@@ -5,6 +5,7 @@ YARN or Hive needed). The full stack is exercised separately by setup/smoke_test
 and `python run.py milestone1 --data synthetic`.
 """
 import os
+import pathlib
 import sys
 
 import pytest
@@ -48,7 +49,8 @@ def settings():
 def typed_view(spark, synth_dir):
     """Synthetic CSVs read exactly as Step 1 reads them, as temp view 'typed_obs'."""
     from cosmic.ingest import TYPED_SELECT, read_raw
-    read_raw(spark, "file://" + os.path.join(synth_dir, "raw", "*.csv")).createOrReplaceTempView("raw_csv")
+    files = sorted(p.as_uri() for p in pathlib.Path(synth_dir, "raw").glob("*.csv"))  # a file list, as Step 1 passes
+    read_raw(spark, files).createOrReplaceTempView("raw_csv")
     spark.sql(TYPED_SELECT).createOrReplaceTempView("typed_nopart")
     spark.sql("""SELECT *, CAST(year(timestamp_seconds(CAST((jd - 2440587.5) * 86400 AS BIGINT))) AS INT) AS obs_year,
                         'UNKNOWN' AS sky_region FROM typed_nopart""").createOrReplaceTempView("typed_obs")

@@ -30,8 +30,13 @@ DEFAULT_SEPARATORS = [":", "+", "|", "/"]
 _CON = {c.upper(): c for c in ["CMa", "CMi", "CVn", "CrA", "CrB", "LMi", "PsA", "TrA", "UMa", "UMi"]}
 
 
+def clean_name(name):
+    """Underscores become spaces and runs of spaces collapse ("DY_PEG" -> "DY PEG")."""
+    return re.sub(r"\s+", " ", str(name).replace("_", " ")).strip()
+
+
 def norm_name(name):
-    return re.sub(r"\s+", " ", str(name)).strip().lower()
+    return clean_name(name).lower()
 
 
 def primary_type(vsx_type, separators=DEFAULT_SEPARATORS):
@@ -74,9 +79,9 @@ def vsx_name_candidates(name):
     """VSX spellings to try for an AAVSO target name, most likely first.
 
     "SS CYG" -> "SS Cyg"; "T CRB" -> "T CrB"; "KHI CYG" -> "khi Cyg"; "V603 AQL" -> "V0603 Aql"
-    (VSX pads V-numbers to four digits).
+    (VSX pads V-numbers to four digits); "DY_PEG" -> "DY Peg" (underscores are spaces).
     """
-    parts = re.sub(r"\s+", " ", str(name)).strip().split(" ")
+    parts = clean_name(name).split(" ")
     out = []
     if len(parts) >= 2 and len(parts[-1]) == 3 and parts[-1].isalpha():
         con = _CON.get(parts[-1].upper(), parts[-1].capitalize())
