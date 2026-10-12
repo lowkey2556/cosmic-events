@@ -5,9 +5,9 @@
 datasets:
   real:
     root: /content/drive/MyDrive/cosmic        # Google Drive folder (labels/, cache/, outputs/ live here)
-    # Folder holding the AAVSO CSVs, searched recursively (EXISTING/, NEW_2024/, NEW_2025/ ...).
+    # Folder holding the AAVSO CSVs, searched recursively (currently raw/ = 2024 files, existing/ = Jan 2025).
     # null = <root>/raw. The environment variable COSMIC_DATA_ROOT overrides this value.
-    data_root: null
+    data_root: /content/drive/MyDrive/cosmic_roja
     hdfs_base: /cosmic
     database: cosmic
     output_subdir: outputs/review2             # Review 2 deliverables (real data only)

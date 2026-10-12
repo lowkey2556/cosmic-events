@@ -25,15 +25,15 @@ drive.mount('/content/drive')"""),
     ("code", """REPO_URL = "https://github.com/lowkey2556/cosmic-events.git"
 import os
 if not os.path.isdir('/content/cosmic/.git'):
-    !git clone -q $REPO_URL /content/cosmic
+    !git clone -q "$REPO_URL" "/content/cosmic"
 else:
-    !cd /content/cosmic && git pull -q
+    !cd "/content/cosmic" && git pull -q
 %cd /content/cosmic
 !git log --oneline | head -15"""),
     ("md", """### Data folder
-Set `DATA_ROOT` to the Drive folder that holds the AAVSO CSVs. It is searched recursively
-(`EXISTING/`, `NEW_2024/`, `NEW_2025/` ...). ZIPs, other files and `DOWNLOAD_LOG/` are ignored."""),
-    ("code", """DATA_ROOT = "/content/drive/MyDrive/AAVSO_DATA"   # <- the folder that contains EXISTING/, NEW_2025/ ...
+`DATA_ROOT` is the Drive folder that holds the AAVSO CSVs. It is searched recursively (`raw/`, `existing/`, and any
+sub-folder added later). ZIPs, other files and `DOWNLOAD_LOG/` are ignored. Stars are identified by `auid`, never by file name."""),
+    ("code", """DATA_ROOT = "/content/drive/MyDrive/cosmic_roja"   # <- contains raw/ (2024) and existing/ (Jan 2025); read recursively
 import os
 os.environ["COSMIC_DATA_ROOT"] = DATA_ROOT        # every `!python run.py ...` below reads this
 assert os.path.isdir(DATA_ROOT), f"Drive folder not found: {DATA_ROOT}"
@@ -75,7 +75,7 @@ for port in (8088, 9870):
     output.serve_kernel_port_as_window(port)"""),
     ("md", "## 4. Raw data in Drive"),
     ("code", """!find "$DATA_ROOT" -type f -iname '*.csv' -not -path '*/DOWNLOAD_LOG/*' | sort | head -100
-!ls -la /content/drive/MyDrive/cosmic/labels 2>/dev/null || echo "no labels file yet - Step 1 will fetch VSX rows from VizieR" """),
+!ls -la "/content/drive/MyDrive/cosmic/labels" 2>/dev/null || echo "no labels file yet - Step 1 will fetch VSX rows from VizieR" """),
     ("md", "## 5. Architecture diagram (slide 3)"),
     ("code", """!which dot >/dev/null || apt-get -qq install -y graphviz   # Graphviz draws the diagram
 !python run.py architecture --data real"""),
@@ -84,8 +84,8 @@ for port in (8088, 9870):
 Hive external table `observations_raw` → partition-pruning test → dataset summary."""),
     ("code", "!python run.py ingest --data real"),
     ("code", """# The raw data in HDFS, and the partitions as Hive itself sees them
-!hdfs dfs -ls -R -h /cosmic/raw | head -60
-!hdfs dfs -du -s -h /cosmic/raw /cosmic/warehouse/observations_raw /cosmic/warehouse/observations_flat
+!hdfs dfs -ls -R -h "/cosmic/raw" | head -60
+!hdfs dfs -du -s -h "/cosmic/raw" "/cosmic/warehouse/observations_raw" "/cosmic/warehouse/observations_flat"
 !hive -S -e "SHOW PARTITIONS cosmic.observations_raw;" 2>/dev/null"""),
     ("md", "## 7. Step 2: Preprocessing in Spark SQL"),
     ("code", "!python run.py preprocess --data real"),
@@ -151,7 +151,7 @@ csv('kmeans_crosstab_label.csv', 'Cluster vs label'); csv('kmeans_crosstab_type.
 fig('fig_model_comparison')
 fig('fig_confusion_dt_vs_proposed')"""),
     ("md", """**Caveat:** these are preliminary results from **one seed on a small test set**. Milestone 2 adds the 5-seed robustness (mean ± std)."""),
-    ("code", "!ls -la /content/drive/MyDrive/cosmic/outputs/review2"),
+    ("code", '!ls -la "/content/drive/MyDrive/cosmic/outputs/review2"'),
 ]
 
 

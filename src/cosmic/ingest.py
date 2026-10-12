@@ -21,6 +21,7 @@ so later steps read only the columns they need; Hive gives every step (and the
 Hive CLI) the same named tables; partitioning lets queries skip whole folders.
 """
 import os
+import re
 
 import pandas as pd
 from pyspark.sql import types as T
@@ -69,6 +70,12 @@ def read_raw(spark, raw_paths):
                           multiLine=True, mode="PERMISSIVE")
 
 
+def hadoop_literal(path):
+    """Escape Hadoop glob characters so a file name containing [ ] { } * ? is read literally by Spark.
+    Spaces need no escaping: paths are passed as separate arguments, never through a shell."""
+    return re.sub(r"([{}\[\]*?\\])", r"\\\1", path)
+
+
 def put_raw_files(cfg):
     """Copy the accepted CSVs into HDFS <base>/raw/<same sub-folders>; return their HDFS URIs."""
     root, files, skipped = discover(cfg)
@@ -85,7 +92,7 @@ def put_raw_files(cfg):
         d = f"{dest}/{rel_dir}" if rel_dir else dest
         hdfs("-mkdir", "-p", d)
         hdfs("-put", "-f", *group, d + "/")
-        uris += [cfg.hdfs_uri(f"{d}/{os.path.basename(f)}") for f in group]
+        uris += [hadoop_literal(cfg.hdfs_uri(f"{d}/{os.path.basename(f)}")) for f in group]
     hdfs("-ls", "-R", "-h", dest)
     return uris
 

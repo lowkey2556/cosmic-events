@@ -77,12 +77,11 @@ ignored, and so is any folder named `DOWNLOAD_LOG`.
 
 ```
 MyDrive/
-├── <data root>/             <- set as DATA_ROOT in the notebook (or COSMIC_DATA_ROOT / data_root)
-│   ├── EXISTING/            <- January 2025 files
-│   ├── NEW_2025/            <- one sub-folder per round; any depth and file names work
-│   ├── NEW_2024/
-│   ├── ...
-│   └── DOWNLOAD_LOG/        <- ignored
+├── cosmic_roja/            <- the data root: DATA_ROOT in the notebook (= data_root in settings.yaml)
+│   ├── raw/                 <- 2024 files (AAVSO default names, observations_*.csv)
+│   ├── existing/            <- the original January 2025 files
+│   ├── <any new folder>/    <- later rounds; any depth and any file names work
+│   └── DOWNLOAD_LOG/        <- ignored, if present
 └── cosmic/
     ├── labels/              <- Step 1 / the audit fetch VSX rows and write vsx_labels.csv here
     ├── cache/               <- created automatically (Hadoop/Spark/Hive tarballs)
