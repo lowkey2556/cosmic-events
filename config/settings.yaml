@@ -93,6 +93,8 @@ kmeans:
   seed: 42
 
 plots:
-  dpi: 300
+  dpi: 300                                     # architecture diagram (Graphviz) resolution
+  png_scale: 2                                 # Plotly PNG = width x height x this (e.g. 1600x900 -> 3200x1800)
+  html_plotlyjs: true                          # embed plotly.js in each HTML (works offline); "cdn" = smaller files
   lightcurve_star: null                        # null = auto-pick the star with the most observers
   lightcurve_top_observers: 6

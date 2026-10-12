@@ -16,7 +16,7 @@ A Spark pipeline that detects anomalous celestial events in crowdsourced **AAVSO
 observations, using each observer's computed reliability as an explicit classifier feature.
 
 **Stack running inside this Colab VM:** Hadoop 3.3.6 (HDFS + YARN, pseudo-distributed) · Spark 3.5.9 on YARN ·
-Hive 3.1.3 metastore on a Derby network server · Spark SQL · Spark MLlib · Matplotlib. Tableau exports come in Milestone 2.
+Hive 3.1.3 metastore on a Derby network server · Spark SQL · Spark MLlib · PyTorch (deep learning). **Every graph is a Plotly figure**, shown inline and saved as PNG (slides) + interactive HTML. The architecture diagram is drawn with Graphviz.
 
 Run top to bottom with **Runtime → Run all**. Outputs are written to `MyDrive/cosmic/outputs/review2/` and shown inline below."""),
     ("md", "## 0. Mount Google Drive and get the code"),
@@ -77,7 +77,8 @@ for port in (8088, 9870):
     ("code", """!find "$DATA_ROOT" -type f -iname '*.csv' -not -path '*/DOWNLOAD_LOG/*' | sort | head -100
 !ls -la /content/drive/MyDrive/cosmic/labels 2>/dev/null || echo "no labels file yet - Step 1 will fetch VSX rows from VizieR" """),
     ("md", "## 5. Architecture diagram (slide 3)"),
-    ("code", "!python run.py architecture --data real"),
+    ("code", """!which dot >/dev/null || apt-get -qq install -y graphviz   # Graphviz draws the diagram
+!python run.py architecture --data real"""),
     ("md", """## 6. Step 1: Ingestion and storage
 `hdfs dfs -put` to `/cosmic/raw/` → explicit-schema read → Parquet + Snappy partitioned by `obs_year`/`sky_region` →
 Hive external table `observations_raw` → partition-pruning test → dataset summary."""),
@@ -100,13 +101,27 @@ Hive external table `observations_raw` → partition-pruning test → dataset su
 !hive -S -e "USE cosmic; SHOW TABLES;" 2>/dev/null"""),
     ("md", "# Review 2 deliverables (all from the real data above)"),
     ("code", """import pandas as pd
+import os
+import plotly.io as pio
 from IPython.display import Image, Markdown, display
 OUT = '/content/drive/MyDrive/cosmic/outputs/review2'
 pd.set_option('display.width', 220); pd.set_option('display.max_columns', 30)
 def csv(name, title=None):
     display(Markdown(f'**{title or name}**')); display(pd.read_csv(f'{OUT}/{name}'))
+def fig(name):
+    # show a saved Plotly figure inline (interactive); its PNG and HTML copies are next to it in OUT
+    path = f'{OUT}/{name}.json'
+    if os.path.exists(path):
+        pio.read_json(path).show()
+    else:
+        display(Markdown(f'*{name}: not produced yet*'))
 def png(name, width=900):
-    display(Image(f'{OUT}/{name}', width=width))"""),
+    display(Image(f'{OUT}/{name}', width=width))
+if os.path.exists(f'{OUT}/figure_export_log.csv'):
+    log = pd.read_csv(f'{OUT}/figure_export_log.csv')
+    bad = log[~log['png'].astype(bool)]
+    print('PNG export: all OK' if bad.empty else f'PNG export FAILED for {len(bad)} figures (HTML kept):')
+    if not bad.empty: display(bad)"""),
     ("md", "## Slide 1: Dataset"),
     ("code", """csv('audit_summary.csv', 'Dataset audit: summary (50 MB check)')
 csv('audit_files.csv', 'Dataset audit: per file'); csv('audit_class_balance.csv', 'Class balance')
@@ -114,27 +129,27 @@ csv('audit_skipped_files.csv', 'Skipped files (bad header)'); csv('audit_unmatch
 csv('dataset_summary.csv', 'Dataset summary')
 csv('rows_per_band.csv', 'Rows per band'); csv('rows_per_type.csv', 'Rows per observation type')
 csv('label_counts.csv', 'Stars per label')
-png('fig_obs_per_star.png')"""),
+fig('fig_obs_per_star')"""),
     ("md", "## Slide 3: Architecture"),
-    ("code", "png('architecture.png', 1100)"),
+    ("code", "png('architecture.png', 1100)   # Graphviz PNG (SVG and DOT source saved next to it)"),
     ("md", "## Slide 5: Preprocessing results"),
-    ("code", """csv('preprocess_row_counts.csv', 'Row counts after each step'); png('fig_preprocessing_funnel.png', 700)
-csv('partition_pruning.csv', 'Partition pruning: partitioned vs unpartitioned'); png('fig_partition_pruning.png', 700)
-csv('lightcurve_star.csv', 'Light-curve star'); png('fig_lightcurve_before_after.png', 1100)
-csv('observer_score_summary.csv', 'Observer scores: summary'); png('fig_observer_score_hist.png', 700)
+    ("code", """csv('preprocess_row_counts.csv', 'Row counts after each step'); fig('fig_preprocessing_funnel')
+csv('partition_pruning.csv', 'Partition pruning: partitioned vs unpartitioned'); fig('fig_partition_pruning')
+csv('lightcurve_star.csv', 'Light-curve star'); fig('fig_lightcurve_before_after')
+csv('observer_score_summary.csv', 'Observer scores: summary'); fig('fig_observer_score_hist')
 csv('observer_top_bottom10.csv', 'Top and bottom 10 observers by agreement score')
 csv('spearman_score_vs_uncertainty.csv', 'Spearman: score vs self-reported uncertainty')"""),
     ("md", "## Slide 7: Proposed model results"),
     ("code", """csv('split_summary.csv', 'Split by star (auid)')
 csv('proposed_model_metrics.csv', 'Proposed model (DT + observer features), seed 42')
-png('fig_confusion_proposed.png', 380)
+fig('fig_confusion_proposed')
 csv('feature_log.csv', 'Feature log')
-csv('kmeans_silhouette.csv', 'K-Means silhouette'); png('fig_kmeans_silhouette.png', 550)
+csv('kmeans_silhouette.csv', 'K-Means silhouette'); fig('fig_kmeans_silhouette')
 csv('kmeans_crosstab_label.csv', 'Cluster vs label'); csv('kmeans_crosstab_type.csv', 'Cluster vs VSX type')"""),
     ("md", "## Slide 8: Comparison with existing classifiers"),
     ("code", """csv('model_metrics.csv', 'All models, same split (seed 42); positive class = anomalous')
-png('fig_model_comparison.png', 1000)
-png('fig_confusion_dt_vs_proposed.png', 750)"""),
+fig('fig_model_comparison')
+fig('fig_confusion_dt_vs_proposed')"""),
     ("md", """**Caveat:** these are preliminary results from **one seed on a small test set**. Milestone 2 adds the 5-seed robustness (mean ± std)."""),
     ("code", "!ls -la /content/drive/MyDrive/cosmic/outputs/review2"),
 ]

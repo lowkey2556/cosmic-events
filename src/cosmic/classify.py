@@ -154,9 +154,9 @@ def run(spark, cfg, seed=None):
     save_csv(res[res["family"] == "proposed"], cfg, "proposed_model_metrics.csv")
     cm = lambda r: [[r["tn"], r["fp"]], [r["fn"], r["tp"]]]
     dtb = res[res["model"] == "DT (baseline)"].iloc[0]
-    plots.confusion(cm(prop), f"Proposed: DT + observer features\n(test stars, seed {c['seed']})",
-                    cfg.output_dir, "fig_confusion_proposed.png")
+    plots.confusion(cm(prop), f"Proposed: DT + observer features<br>(test stars, seed {c['seed']})",
+                    cfg.output_dir, "fig_confusion_proposed")
     plots.confusion_side_by_side(cm(dtb), "DT, baseline features", cm(prop), "DT + observer features (proposed)",
-                                 cfg.output_dir, "fig_confusion_dt_vs_proposed.png")
+                                 cfg.output_dir, "fig_confusion_dt_vs_proposed")
     plots.grouped_metrics(res, cfg.output_dir)
     return res

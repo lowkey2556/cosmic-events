@@ -3,9 +3,10 @@
 A Spark pipeline that detects anomalous celestial events in crowdsourced **AAVSO** variable-star
 observations, using each observer's computed reliability as an explicit classifier feature.
 
-**Tools:** Hadoop HDFS · YARN · Apache Spark (PySpark) · Spark SQL · Hive · Spark MLlib (Decision
-Tree, Naive Bayes, K-Means) · Matplotlib · Tableau. Everything runs on a single-node
-pseudo-distributed cluster **inside Google Colab**.
+**Tools:** Hadoop HDFS · YARN · Apache Spark (PySpark) · Spark SQL · Hive · Spark MLlib · PyTorch
+(deep-learning model only) · **Plotly** for every graph (inline in the notebook, saved as PNG via
+`kaleido` and as interactive HTML) · Graphviz for the architecture diagram. Matplotlib and Seaborn
+are not used anywhere. Everything runs on a single-node pseudo-distributed cluster **inside Google Colab**.
 
 | Step | What |
 |---|---|
@@ -68,7 +69,8 @@ folder (`/cosmic_synth`), a separate Hive database (`cosmic_synth`) and a separa
 config/       settings.yaml, label_map.yaml, stars.yaml (44-star download list)
 setup/        install_stack.sh, start_stack.sh, stop_stack.sh, smoke_tests.sh, smoke_spark_hive.py
 src/cosmic/   one module per step: ingest, preprocess, observer_score, features, classify, cluster
-              + labels (VSX), plots (Matplotlib), architecture (diagram), spark_session, config
+              + audit, rawfiles, windowing, labels (VSX), plots (Plotly), architecture (Graphviz),
+              spark_session, config
 scripts/      make_synthetic.py (test data), build_notebook.py (generates the Colab notebook)
 notebooks/    cosmic_colab.ipynb
 tests/        pytest unit tests

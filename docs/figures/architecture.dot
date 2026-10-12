@@ -1,0 +1,46 @@
+digraph cosmic {
+  graph [rankdir=TB, newrank=true, nodesep=0.45, ranksep=0.55, bgcolor="white", pad=0.3, fontname="Helvetica",
+         labelloc=t, fontsize=22, label=<<b>Cosmic Event Crowdsourcing Platform — pipeline architecture</b>>];
+  node  [shape=box, style="rounded,filled", color="#52514e", penwidth=1.2, fontname="Helvetica",
+         fontsize=11, fontcolor="#0b0b0b", margin="0.18,0.10", width=3.1];
+  edge  [color="#2a78d6", penwidth=1.8, arrowsize=0.8];
+  drive [fillcolor="#f3f2ee", label=<<b><font point-size="13">Google Drive</font></b><br/><font color="#52514e">AAVSO CSV exports, one folder per round<br/>+ VSX types (VizieR)</font>>];
+  audit [fillcolor="#f3f2ee", label=<<b><font point-size="13">Python — Step 0</font></b><br/><font color="#52514e">dataset audit: MB, rows, stars,<br/>50 MB check, header check</font>>];
+  hdfs [fillcolor="#fdf0e9", label=<<b><font point-size="13">Hadoop HDFS</font></b><br/><font color="#52514e">/cosmic/raw/&lt;round&gt;/*.csv</font>>];
+  ingest [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark on YARN — Step 1</font></b><br/><font color="#52514e">explicit-schema read → Parquet + Snappy<br/>partitioned by obs_year / sky_region</font>>];
+  prep [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark SQL — Step 2</font></b><br/><font color="#52514e">dedup · null keys · comment codes<br/>upper limits · thinning · band normalisation</font>>];
+  score [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark SQL — Step 3</font></b><br/><font color="#52514e">observer agreement score<br/>leave-one-out consensus self-join → A_k</font>>];
+  win [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark — windowing</font></b><br/><font color="#52514e">100-day windows (stride 50 d, ≥ 20 obs)<br/>label + auid per window</font>>];
+  feat [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark — window features</font></b><br/><font color="#52514e">amplitude · moments · Lomb–Scargle<br/>cadence · observer features</font>>];
+  seq [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark → Parquet export</font></b><br/><font color="#52514e">token sequences (L = 200, masked)<br/>mag_norm, Δt, band, type, A_k, offset</font>>];
+  mllib [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark MLlib</font></b><br/><font color="#52514e">Naive Bayes · Decision Tree<br/>Random Forest · Logistic Regression</font>>];
+  rga [fillcolor="#efeafb", label=<<b><font point-size="13">PyTorch (Colab GPU)</font></b><br/><font color="#52514e">RGA-Net: reliability-gated attention<br/>+ ablations</font>>];
+  cmp [fillcolor="#f3f2ee", label=<<b><font point-size="13">Comparison</font></b><br/><font color="#52514e">5 star-grouped splits, same for all models<br/>mean ± std on test stars</font>>];
+  fig [fillcolor="#fef6e0", label=<<b><font point-size="13">Plotly</font></b><br/><font color="#52514e">tables and figures<br/>PNG + interactive HTML</font>>];
+  hive [fillcolor="#fdf0e9", label=<<b><font point-size="13">Hive metastore</font></b><br/><font color="#52514e">observations_raw (external), obs_clean,<br/>observer_scores, windows, metrics</font>>];
+  { rank=same; drive; audit; hdfs; ingest; }
+  { rank=same; win; score; prep; hive; }
+  { rank=same; feat; seq; }
+  { rank=same; mllib; rga; }
+  { rank=same; cmp; fig; legend; }
+  drive -> audit;
+  audit -> hdfs;
+  hdfs -> ingest;
+  ingest -> prep;
+  score -> prep [dir=back];
+  win -> score [dir=back];
+  win -> feat;
+  win -> seq;
+  feat -> mllib;
+  seq -> rga;
+  mllib -> cmp;
+  rga -> cmp;
+  cmp -> fig;
+  prep -> hive [style=invis];
+  ingest -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
+  prep -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
+  score -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
+  win -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
+  legend [shape=plaintext, style="", fontsize=11, label=<<table border="0" cellspacing="4"><tr><td bgcolor="#e8f0fb" width="22"> </td><td align="left">Spark / Spark SQL / MLlib, submitted to YARN</td></tr><tr><td bgcolor="#fdf0e9" width="22"> </td><td align="left">HDFS / Hive storage</td></tr><tr><td bgcolor="#f3f2ee" width="22"> </td><td align="left">Plain Python on the Colab VM</td></tr><tr><td bgcolor="#efeafb" width="22"> </td><td align="left">PyTorch on the GPU</td></tr><tr><td bgcolor="#fef6e0" width="22"> </td><td align="left">Plotly</td></tr><tr><td></td><td align="left"><font color="#eb6834">orange dashed arrow</font>: table registered in Hive</td></tr><tr><td></td><td align="left"><i>Single-node pseudo-distributed cluster on Colab: HDFS, YARN, Hive metastore.</i></td></tr></table>>];
+  fig -> legend [style=invis, minlen=2];
+}

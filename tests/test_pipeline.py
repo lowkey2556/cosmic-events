@@ -294,3 +294,40 @@ def test_audit_on_synthetic(synth_dir, tmp_path):
     assert bal["stars"].sum() == r["stars"]["auid"].nunique()
     assert bal.loc["unlabelled", "stars"] >= 2                          # the synthetic file has 2 unmatched types
     assert len(r["unmatched"]) == bal.loc["unlabelled", "stars"]
+
+
+# ---------------------------------------------------------------- figures (Plotly only)
+def test_no_matplotlib_or_seaborn_anywhere():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    hits = []
+    for d in ("src", "scripts", "setup", "tests"):
+        for dirpath, _, files in os.walk(os.path.join(root, d)):
+            for f in files:
+                if f.endswith(".py") and f != "test_pipeline.py":
+                    text = open(os.path.join(dirpath, f), encoding="utf-8").read()
+                    if "import matplotlib" in text or "import seaborn" in text or "from matplotlib" in text:
+                        hits.append(f)
+    assert hits == []
+    reqs = [l.split("#")[0].strip().lower() for l in open(os.path.join(root, "requirements.txt"))]
+    assert not any(r.startswith(("matplotlib", "seaborn")) for r in reqs)
+
+
+def test_plotly_figure_saved_as_html_json_and_png_or_logged(tmp_path):
+    from cosmic import plots
+    pdf = pd.DataFrame({"jd": [2460000.0, 2460001.0, 2460002.0], "mag": [10.0, 11.0, 10.5],
+                        "mag_norm": [-0.5, 0.5, 0.0], "band": ["V"] * 3, "observer": ["A", "B", "A"]})
+    plots.lightcurve_before_after(pdf, "X", ["A", "B"], str(tmp_path))
+    base = tmp_path / "fig_lightcurve_before_after"
+    assert (tmp_path / (base.name + ".html")).exists() and (tmp_path / (base.name + ".json")).exists()
+    log = pd.read_csv(tmp_path / "figure_export_log.csv")
+    assert list(log["figure"]) == [base.name]
+    assert (tmp_path / (base.name + ".png")).exists() == bool(log["png"].iloc[0])   # PNG or a logged failure
+    import plotly.io as pio
+    fig = pio.read_json(str(tmp_path / (base.name + ".json")))
+    assert fig.layout.yaxis.autorange == "reversed" and fig.layout.yaxis2.autorange == "reversed"
+
+
+def test_architecture_dot_has_windowing_and_rganet():
+    from cosmic.architecture import dot_source
+    src = dot_source()
+    assert src.startswith("digraph") and "windowing" in src and "RGA-Net" in src and "PyTorch" in src

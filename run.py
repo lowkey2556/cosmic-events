@@ -4,7 +4,7 @@
 
 Steps:
     audit          Step 0  dataset audit of the raw CSVs: sizes, rows, stars, 50 MB check (no Spark needed)
-    architecture   draw architecture.png (no Spark needed)
+    architecture   draw the architecture diagram with Graphviz: PNG + SVG + DOT (no Spark needed)
     ingest         Step 1  HDFS put, VSX labels, Parquet + Hive external table, partition pruning, dataset summary
     preprocess     Step 2  Spark SQL cleaning + band normalisation
     score          Step 3  observer agreement scores
@@ -32,9 +32,9 @@ SPARK_STEPS = ["ingest", "preprocess", "score", "features", "classify", "cluster
 
 def architecture(cfg):
     from cosmic.architecture import draw
-    path = draw(cfg.repo_path(os.path.join("docs", "figures", "architecture.png")),
-                dpi=cfg.section("plots")["dpi"])
-    shutil.copy(path, os.path.join(cfg.output_dir, "architecture.png"))
+    path = draw(os.path.join(cfg.output_dir, "architecture.png"), dpi=cfg.section("plots")["dpi"])
+    for ext in (".png", ".svg", ".dot"):  # keep a copy in the repo for the docs
+        shutil.copy(os.path.splitext(path)[0] + ext, cfg.repo_path(os.path.join("docs", "figures", "architecture" + ext)))
 
 
 def main(argv=None):
@@ -44,6 +44,9 @@ def main(argv=None):
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     a = ap.parse_args(argv)
     cfg = load_config(a.data, a.set)
+    if a.step not in ("audit", "architecture"):
+        from cosmic import plots
+        plots.set_export(**cfg.section("plots"))
     print(f"dataset={a.data}  hive database={cfg.db}  hdfs={cfg.hdfs_base}  outputs={cfg.output_dir}")
 
     if a.step == "audit":
