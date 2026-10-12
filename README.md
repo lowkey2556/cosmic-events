@@ -20,6 +20,8 @@ are not used anywhere. Everything runs on a single-node pseudo-distributed clust
 
 ## Open the notebook
 
+**Step-by-step guide: [docs/COLAB_GUIDE.md](docs/COLAB_GUIDE.md).**
+
 1. Put the AAVSO CSVs in sub-folders of one Drive data folder (see [docs/DATA_DOWNLOAD.md](docs/DATA_DOWNLOAD.md))
    and set `DATA_ROOT` in the notebook's first configuration cell.
 2. Open `notebooks/cosmic_colab.ipynb` in Colab (**File → Open notebook → GitHub**, paste the repo URL).
