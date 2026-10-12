@@ -25,8 +25,64 @@ def test_primary_type_and_labels():
     assert label_for("UGSS+E", lm) == 1
     assert label_for("M", lm) == 0
     assert label_for("NR+ELL", lm) is None
-    assert primary_type("RRAB/BL", [":", "+", "|", "/"]) == "RRAB"
-    assert primary_type("RRAB/BL") == "RRAB/BL"          # without '/', the default spec rule
+    assert primary_type("RRAB/BL") == "RRAB"
+    assert primary_type("NL/VY") == "NL"                  # VY Scl
+    assert primary_type("RRAB/BL", [":", "+", "|"]) == "RRAB/BL"
+
+
+def test_label_map_file():
+    from cosmic.config import load_config
+    from cosmic.labels import label_for
+    lm = load_config("synthetic").load_yaml("label_map")
+    assert label_for("NR", lm) == 1                       # T CrB
+    assert label_for("UGWZ/IBWD", lm) == 1                # WZ Sge
+    assert label_for("NL/VY+E", lm) == 1                  # VY Scl
+    assert label_for("M", lm) == 0
+
+
+def test_unmatched_types_are_listed(capsys):
+    from cosmic.labels import assign_labels
+    stars = pd.DataFrame({"auid": ["A", "B", "C"], "data_name": ["X1", "X2", "X3"]})
+    vsx = pd.DataFrame({"auid": ["A", "B"], "name": ["X1", "X2"], "ra": [1.0, 2.0], "dec": [10.0, -40.0],
+                        "type": ["UGSS", "GCAS"]})
+    out, un = assign_labels(stars, vsx, {"anomalous": ["UGSS"], "normal": ["M"]}, [-90, -30, 0, 30, 60, 90])
+    assert list(out["label"].astype(object)) == [1, pd.NA, pd.NA]
+    assert dict(zip(un["auid"], un["reason"])) == {"B": "primary type not in label map", "C": "no VSX match"}
+    assert "GCAS" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- raw file discovery
+def _write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def test_recursive_discovery_and_header_check(tmp_path):
+    from cosmic.rawfiles import RAW_COLUMNS, check_headers, find_csv_files
+    good = ",".join(RAW_COLUMNS) + "\n1,SS CYG,000-BCP-220,2460676.6,12.5,0.05,False,V,CCD,ABC,,,,,,,,,\n"
+    root = str(tmp_path)
+    _write(os.path.join(root, "AAVSO_DATA", "EXISTING", "a.csv"), good)
+    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "a.csv"), good)          # same name, other round
+    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "b.CSV"), "﻿" + good)  # BOM, upper-case extension
+    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "bad.csv"), "star,date,mag\nx,1,2\n")
+    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "empty.csv"), "")
+    _write(os.path.join(root, "AAVSO_DATA", "DOWNLOAD_LOG", "log.csv"), good)
+    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "x.zip"), "zip")
+    files = find_csv_files(root)
+    rel = sorted(os.path.relpath(f, root).replace(os.sep, "/") for f in files)
+    assert rel == ["AAVSO_DATA/EXISTING/a.csv", "AAVSO_DATA/NEW_2025/a.csv", "AAVSO_DATA/NEW_2025/b.CSV",
+                   "AAVSO_DATA/NEW_2025/bad.csv", "AAVSO_DATA/NEW_2025/empty.csv"]
+    ok, skipped = check_headers(files, root)
+    assert len(ok) == 3
+    assert sorted(os.path.basename(s["file"]) for s in skipped) == ["bad.csv", "empty.csv"]
+
+
+def test_data_root_override(monkeypatch):
+    from cosmic.config import load_config
+    monkeypatch.setenv("COSMIC_DATA_ROOT", "/content/drive/MyDrive/X")
+    assert load_config("real").raw_dir == "/content/drive/MyDrive/X"
+    assert load_config("synthetic").raw_dir.replace(os.sep, "/").endswith("data/synthetic/raw")  # env is real-only
 
 
 def test_vsx_name_candidates():
@@ -182,3 +238,59 @@ def test_metrics(spark):
     assert m["precision"] == pytest.approx(2 / 3)
     assert m["recall"] == pytest.approx(2 / 3)
     assert m["balanced_accuracy"] == pytest.approx((2 / 3 + 3 / 4) / 2)
+
+
+
+# ---------------------------------------------------------------- dataset audit (synthetic, no Spark)
+def test_window_rule():
+    from cosmic.windowing import count_windows, longest_coverage, window_counts
+    jd = np.concatenate([np.arange(0, 100, 1.0), np.arange(300, 330, 1.0)])
+    starts, counts = window_counts(jd, 100, 50)
+    assert list(starts) == [0, 50, 100, 150, 200, 250, 300]
+    assert list(counts) == [100, 50, 0, 0, 0, 30, 30]
+    assert count_windows(jd, 100, 50, 20) == 4
+    assert count_windows(jd, 100, 50, 31) == 2
+    assert longest_coverage(jd, 30) == 99.0               # the 200-day gap breaks coverage
+    assert longest_coverage(jd, 250) == 329.0
+    assert count_windows([], 100, 50, 20) == 0
+
+
+def test_audit_on_synthetic(synth_dir, tmp_path):
+    import shutil
+    from cosmic import audit
+    from cosmic.config import load_config
+    from cosmic.rawfiles import RAW_COLUMNS
+    root = tmp_path / "data"
+    raw = root / "raw"
+    shutil.copytree(os.path.join(synth_dir, "raw"), raw / "EXISTING")
+    shutil.copytree(os.path.join(synth_dir, "labels"), root / "labels")
+    first = sorted(os.listdir(raw / "EXISTING"))[0]
+    (raw / "NEW_2025").mkdir()
+    shutil.copy(raw / "EXISTING" / first, raw / "NEW_2025" / first)       # an overlapping download
+    (raw / "NEW_2025" / "bad.csv").write_text("star,date\nx,1\n")
+    (raw / "DOWNLOAD_LOG").mkdir()
+    shutil.copy(raw / "EXISTING" / first, raw / "DOWNLOAD_LOG" / "x.csv")
+    # one record whose quoted comment contains a line break
+    rec = '9,T CrB,000-BBW-825,2460702.9,10.1,0.01,False,V,CCD,SCMA,,,,,,,,,"line one\r\nline two"\n'
+    (raw / "NEW_2025" / "multi.csv").write_bytes((",".join(RAW_COLUMNS) + "\n" + rec).encode())
+    cfg = load_config("synthetic", [f"datasets.synthetic.root={root}", f"datasets.synthetic.output_subdir={tmp_path / 'out'}"])
+    r = audit.run(cfg, fetch_vsx=False)
+    s = dict(zip(r["summary"]["item"], r["summary"]["value"]))
+    files = r["files"].set_index("file")
+    dup_rows = files.loc[f"NEW_2025/{first}", "rows"]
+    assert files.loc[f"NEW_2025/{first}", "repeated_rows"] == dup_rows
+    assert files.loc["NEW_2025/multi.csv", "rows"] == 1
+    # the copied file repeats all its rows; the synthetic files also contain ~1% exact re-submissions
+    assert s["repeated rows (same auid, jd, band, observer, mag)"] == files["repeated_rows"].sum() > dup_rows
+    assert list(r["skipped"]["file"]) == ["NEW_2025/bad.csv"]
+    assert s["csv files accepted"] == len(os.listdir(raw / "EXISTING")) + 2
+    assert s["unique-observation size, MB (repeats across files removed)"] < s["total CSV size, MB (1 MB = 1,048,576 bytes)"]
+    assert s["target 50 MB: total size"] == "FAIL"                       # synthetic data is tiny
+    # every row is counted once: rows in files = sum of per-star unique rows + repeats
+    assert r["stars"]["rows"].sum() + files["repeated_rows"].sum() == s["rows (all files)"]
+    # exact bytes: the multi-line record is counted with all its bytes
+    assert audit.iter_records(str(raw / "NEW_2025" / "multi.csv")).__next__()[0] == len(rec.encode())
+    bal = r["balance"].set_index("class")
+    assert bal["stars"].sum() == r["stars"]["auid"].nunique()
+    assert bal.loc["unlabelled", "stars"] >= 2                          # the synthetic file has 2 unmatched types
+    assert len(r["unmatched"]) == bal.loc["unlabelled", "stars"]

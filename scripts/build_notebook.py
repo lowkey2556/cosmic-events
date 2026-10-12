@@ -18,7 +18,7 @@ observations, using each observer's computed reliability as an explicit classifi
 **Stack running inside this Colab VM:** Hadoop 3.3.6 (HDFS + YARN, pseudo-distributed) · Spark 3.5.9 on YARN ·
 Hive 3.1.3 metastore on a Derby network server · Spark SQL · Spark MLlib · Matplotlib. Tableau exports come in Milestone 2.
 
-Run top to bottom with **Runtime → Run all**. Outputs are written to `MyDrive/cosmic/review2/` and shown inline below."""),
+Run top to bottom with **Runtime → Run all**. Outputs are written to `MyDrive/cosmic/outputs/review2/` and shown inline below."""),
     ("md", "## 0. Mount Google Drive and get the code"),
     ("code", """from google.colab import drive
 drive.mount('/content/drive')"""),
@@ -30,6 +30,21 @@ else:
     !cd /content/cosmic && git pull -q
 %cd /content/cosmic
 !git log --oneline | head -15"""),
+    ("md", """### Data folder
+Set `DATA_ROOT` to the Drive folder that holds the AAVSO CSVs. It is searched recursively
+(`EXISTING/`, `NEW_2024/`, `NEW_2025/` ...). ZIPs, other files and `DOWNLOAD_LOG/` are ignored."""),
+    ("code", """DATA_ROOT = "/content/drive/MyDrive/AAVSO_DATA"   # <- the folder that contains EXISTING/, NEW_2025/ ...
+import os
+os.environ["COSMIC_DATA_ROOT"] = DATA_ROOT        # every `!python run.py ...` below reads this
+assert os.path.isdir(DATA_ROOT), f"Drive folder not found: {DATA_ROOT}"
+!find "$DATA_ROOT" -maxdepth 2 -type d | sort"""),
+    ("md", """## Step 0: Dataset audit (plain Python, runs before the Big Data stack)
+Per file and in total: size in MB, rows, stars, observers and date range. The total size gets a PASS/FAIL
+against the 50 MB target, both as stored and after removing observations repeated across overlapping downloads.
+Per star: rows, observers, dates, longest continuous coverage and the number of 100-day windows.
+Class balance, skipped files and unmatched VSX types. (1 MB = 1,048,576 bytes.)"""),
+    ("code", """!pip -q install pyyaml astropy astroquery
+!python run.py audit --data real"""),
     ("md", """## 1. Install the stack
 Java 8 comes from apt. Hadoop, Spark, Hive and Derby tarballs are cached in `MyDrive/cosmic/cache/`, so a reinstall after a Colab reset only extracts them.
 The first run downloads about 1.5 GB."""),
@@ -59,41 +74,44 @@ YARN ResourceManager is on 8088, the HDFS NameNode on 9870, and the Spark UI on 
 for port in (8088, 9870):
     output.serve_kernel_port_as_window(port)"""),
     ("md", "## 4. Raw data in Drive"),
-    ("code", """!ls -la /content/drive/MyDrive/cosmic/raw | head -60
+    ("code", """!find "$DATA_ROOT" -type f -iname '*.csv' -not -path '*/DOWNLOAD_LOG/*' | sort | head -100
 !ls -la /content/drive/MyDrive/cosmic/labels 2>/dev/null || echo "no labels file yet - Step 1 will fetch VSX rows from VizieR" """),
     ("md", "## 5. Architecture diagram (slide 3)"),
     ("code", "!python run.py architecture --data real"),
-    ("md", """## 6. Step 1: Ingestion and storage (Idhazhya)
+    ("md", """## 6. Step 1: Ingestion and storage
 `hdfs dfs -put` to `/cosmic/raw/` → explicit-schema read → Parquet + Snappy partitioned by `obs_year`/`sky_region` →
 Hive external table `observations_raw` → partition-pruning test → dataset summary."""),
     ("code", "!python run.py ingest --data real"),
     ("code", """# The raw data in HDFS, and the partitions as Hive itself sees them
-!hdfs dfs -ls -h /cosmic/raw | head -60
+!hdfs dfs -ls -R -h /cosmic/raw | head -60
 !hdfs dfs -du -s -h /cosmic/raw /cosmic/warehouse/observations_raw /cosmic/warehouse/observations_flat
 !hive -S -e "SHOW PARTITIONS cosmic.observations_raw;" 2>/dev/null"""),
-    ("md", "## 7. Step 2: Preprocessing in Spark SQL (Sanjhana)"),
+    ("md", "## 7. Step 2: Preprocessing in Spark SQL"),
     ("code", "!python run.py preprocess --data real"),
-    ("md", "## 8. Step 3: Observer agreement score (Sanjhana)"),
+    ("md", "## 8. Step 3: Observer agreement score"),
     ("code", "!python run.py score --data real"),
-    ("md", "## 9. Step 4: Features (Rojashree)"),
+    ("md", "## 9. Step 4: Features"),
     ("code", "!python run.py features --data real"),
-    ("md", "## 10. Step 5: Classification, one fixed seed (Rojashree)"),
+    ("md", "## 10. Step 5: Classification, one fixed seed"),
     ("code", "!python run.py classify --data real"),
-    ("md", "## 11. Step 6: K-Means (Lok)"),
+    ("md", "## 11. Step 6: K-Means"),
     ("code", "!python run.py cluster --data real"),
     ("code", """# Hive tables produced by the pipeline (listed through the Hive CLI)
 !hive -S -e "USE cosmic; SHOW TABLES;" 2>/dev/null"""),
     ("md", "# Review 2 deliverables (all from the real data above)"),
     ("code", """import pandas as pd
 from IPython.display import Image, Markdown, display
-OUT = '/content/drive/MyDrive/cosmic/review2'
+OUT = '/content/drive/MyDrive/cosmic/outputs/review2'
 pd.set_option('display.width', 220); pd.set_option('display.max_columns', 30)
 def csv(name, title=None):
     display(Markdown(f'**{title or name}**')); display(pd.read_csv(f'{OUT}/{name}'))
 def png(name, width=900):
     display(Image(f'{OUT}/{name}', width=width))"""),
     ("md", "## Slide 1: Dataset"),
-    ("code", """csv('dataset_summary.csv', 'Dataset summary')
+    ("code", """csv('audit_summary.csv', 'Dataset audit: summary (50 MB check)')
+csv('audit_files.csv', 'Dataset audit: per file'); csv('audit_class_balance.csv', 'Class balance')
+csv('audit_skipped_files.csv', 'Skipped files (bad header)'); csv('audit_unmatched_vsx_types.csv', 'Unmatched VSX types')
+csv('dataset_summary.csv', 'Dataset summary')
 csv('rows_per_band.csv', 'Rows per band'); csv('rows_per_type.csv', 'Rows per observation type')
 csv('label_counts.csv', 'Stars per label')
 png('fig_obs_per_star.png')"""),
@@ -118,7 +136,7 @@ csv('kmeans_crosstab_label.csv', 'Cluster vs label'); csv('kmeans_crosstab_type.
 png('fig_model_comparison.png', 1000)
 png('fig_confusion_dt_vs_proposed.png', 750)"""),
     ("md", """**Caveat:** these are preliminary results from **one seed on a small test set**. Milestone 2 adds the 5-seed robustness (mean ± std)."""),
-    ("code", "!ls -la /content/drive/MyDrive/cosmic/review2"),
+    ("code", "!ls -la /content/drive/MyDrive/cosmic/outputs/review2"),
 ]
 
 

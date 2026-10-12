@@ -2,7 +2,8 @@
 
     python run.py <step> [--data real|synthetic] [--set key.sub=value ...]
 
-Steps (Milestone 1):
+Steps:
+    audit          Step 0  dataset audit of the raw CSVs: sizes, rows, stars, 50 MB check (no Spark needed)
     architecture   draw architecture.png (no Spark needed)
     ingest         Step 1  HDFS put, VSX labels, Parquet + Hive external table, partition pruning, dataset summary
     preprocess     Step 2  Spark SQL cleaning + band normalisation
@@ -12,7 +13,7 @@ Steps (Milestone 1):
     cluster        Step 6  K-Means
     milestone1     all of the above, in order
 
-`--data real` (default) uses Drive data and writes to Drive/cosmic/review2/.
+`--data real` (default) uses Drive data and writes to Drive/cosmic/outputs/review2/.
 `--data synthetic` uses data/synthetic/ and writes to synthetic_run/ (never review2/).
 """
 import argparse
@@ -38,13 +39,18 @@ def architecture(cfg):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["architecture", *SPARK_STEPS, "milestone1"])
+    ap.add_argument("step", choices=["audit", "architecture", *SPARK_STEPS, "milestone1"])
     ap.add_argument("--data", choices=["real", "synthetic"], default="real")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     a = ap.parse_args(argv)
     cfg = load_config(a.data, a.set)
     print(f"dataset={a.data}  hive database={cfg.db}  hdfs={cfg.hdfs_base}  outputs={cfg.output_dir}")
 
+    if a.step == "audit":
+        from cosmic import audit
+        print(f"data folder: {cfg.raw_dir}")
+        audit.run(cfg)
+        return
     steps = ["architecture", *SPARK_STEPS] if a.step == "milestone1" else [a.step]
     if "architecture" in steps:
         architecture(cfg)

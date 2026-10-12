@@ -4,18 +4,22 @@
 # Two datasets live side by side and never mix: different HDFS base, Hive database and output folder.
 datasets:
   real:
-    root: /content/drive/MyDrive/cosmic        # Google Drive folder (raw/ and labels/ live here)
+    root: /content/drive/MyDrive/cosmic        # Google Drive folder (labels/, cache/, outputs/ live here)
+    # Folder holding the AAVSO CSVs, searched recursively (EXISTING/, NEW_2024/, NEW_2025/ ...).
+    # null = <root>/raw. The environment variable COSMIC_DATA_ROOT overrides this value.
+    data_root: null
     hdfs_base: /cosmic
     database: cosmic
-    output_subdir: review2                     # Review 2 deliverables (real data only)
+    output_subdir: outputs/review2             # Review 2 deliverables (real data only)
   synthetic:
     root: data/synthetic                       # relative to the repo; created by scripts/make_synthetic.py
+    data_root: null                            # = data/synthetic/raw
     hdfs_base: /cosmic_synth
     database: cosmic_synth
     output_subdir: synthetic_run               # NEVER review2
 
 paths:
-  raw_subdir: raw                              # <root>/raw/*.csv  (AAVSO exports)
+  raw_subdir: raw                              # default data_root = <root>/raw
   labels_file: labels/vsx_labels.csv           # <root>/labels/vsx_labels.csv (VSX rows for our stars)
   star_list: config/stars.yaml
   label_map: config/label_map.yaml
@@ -40,7 +44,19 @@ spark:
 ingest:
   # Declination bands (degrees) used for the sky_region partition column.
   dec_band_edges: [-90, -30, 0, 30, 60, 90]
+  # Sub-folders of data_root that are never read (any depth). Only *.csv files are read; ZIPs etc. are ignored.
+  exclude_dirs: [DOWNLOAD_LOG]
   pruning_test_year: null                      # null = the year with the most rows
+
+audit:
+  target_mb: 50                                # Review 2 size target; 1 MB = 1,048,576 bytes
+  coverage_max_gap_days: 30                    # "continuous coverage" breaks at any gap longer than this
+
+# Time windows: the samples for both RGA-Net and the ML models.
+windows:
+  length_days: 100
+  stride_days: 50
+  min_obs: 20                                  # windows with fewer observations are dropped
 
 preprocess:
   # AAVSO comment codes that mark an observation as unreliable (any letter present -> dropped).

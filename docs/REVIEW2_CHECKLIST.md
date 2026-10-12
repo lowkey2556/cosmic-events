@@ -1,7 +1,7 @@
 # Review 2 checklist: slide → exact files
 
 All result files are produced **from the real AAVSO data** by `python run.py milestone1 --data real`
-(one notebook cell per step). They are saved in `MyDrive/cosmic/review2/` and shown inline in
+(one notebook cell per step). They are saved in `MyDrive/cosmic/outputs/review2/` and shown inline in
 `notebooks/cosmic_colab.ipynb`. Nothing in `review2/` comes from synthetic data: synthetic runs
 write to `synthetic_run/`, and the code refuses to write synthetic output to `review2/`.
 
