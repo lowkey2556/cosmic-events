@@ -6,10 +6,14 @@ What it does:
   2. Fetches name, RA, Dec and variability type for ONLY those stars from VizieR
      with astroquery (one polite request per star). If a labels CSV already exists
      in Drive (e.g. exported by hand from the VizieR website), it is used instead.
+     Stars already in that file are not queried again; only stars that are new in the
+     data (e.g. after a new download round) are fetched and appended.
   3. Turns the VSX type into a binary label with config/label_map.yaml, matching on
-     the primary type (the text before any ':', '+' or '|'), and assigns each star a
+     the primary type (the text before any ':', '+', '|' or '/'), and assigns each star a
      declination band (`sky_region`) that is later used to partition the data.
-  4. Saves the result as the Hive table `star_labels`.
+  4. Prints every star whose type is not in the label map (or that has no VSX match),
+     so nothing is dropped silently; saves the list as unmatched_vsx_types.csv.
+  5. Saves the result as the Hive table `star_labels`.
 
 Why: the classifier needs a ground-truth class per star, and the sky map / sky_region
 partitioning needs coordinates. Labels are per star, so we group on `auid` — never on
@@ -21,9 +25,7 @@ import time
 
 import pandas as pd
 
-from .spark_session import save_hive_table
-
-DEFAULT_SEPARATORS = [":", "+", "|"]
+DEFAULT_SEPARATORS = [":", "+", "|", "/"]
 # IAU abbreviations whose VSX spelling is not simply Capitalised ("CRB" -> "CrB", "UMA" -> "UMa")
 _CON = {c.upper(): c for c in ["CMa", "CMi", "CVn", "CrA", "CrB", "LMi", "PsA", "TrA", "UMa", "UMi"]}
 
@@ -33,7 +35,7 @@ def norm_name(name):
 
 
 def primary_type(vsx_type, separators=DEFAULT_SEPARATORS):
-    """Primary VSX type: the text before the first separator ("UGSS+E" -> "UGSS", "RRAB/BL" -> "RRAB")."""
+    """Primary VSX type: the text before the first separator ("UGSS+E" -> "UGSS", "NL/VY" -> "NL")."""
     if vsx_type is None or (isinstance(vsx_type, float) and pd.isna(vsx_type)):
         return None
     t = re.split("|".join(re.escape(c) for c in separators), str(vsx_type).strip())[0].strip().upper()
@@ -116,54 +118,88 @@ def fetch_vsx(names, pause_s=1.0):
     return pd.DataFrame(rows, columns=["queried_name", "name", "ra", "dec", "type"])
 
 
-def stars_in_data(spark, raw_hdfs_glob):
+def stars_in_data(spark, raw_paths):
     """auid -> most frequent target spelling, computed in Spark on the raw files."""
     from .ingest import read_raw  # same reader as Step 1 (multi-line safe)
-    df = read_raw(spark, raw_hdfs_glob).select("auid", "target")
+    df = read_raw(spark, raw_paths).select("auid", "target")
     df.createOrReplaceTempView("raw_names")
     return spark.sql("""
         SELECT auid, target AS data_name, n FROM (
-          SELECT auid, target, COUNT(*) AS n,
-                 ROW_NUMBER() OVER (PARTITION BY auid ORDER BY COUNT(*) DESC, target) AS rk
-          FROM raw_names WHERE auid IS NOT NULL GROUP BY auid, target) WHERE rk = 1
+          SELECT UPPER(TRIM(auid)) AS auid, TRIM(target) AS target, COUNT(*) AS n,
+                 ROW_NUMBER() OVER (PARTITION BY UPPER(TRIM(auid)) ORDER BY COUNT(*) DESC, TRIM(target)) AS rk
+          FROM raw_names WHERE auid IS NOT NULL GROUP BY UPPER(TRIM(auid)), TRIM(target)) WHERE rk = 1
     """).toPandas()
 
 
-def build_labels(spark, cfg, raw_hdfs_glob):
-    label_map = cfg.load_yaml("label_map")
-    edges = cfg.section("ingest")["dec_band_edges"]
-    data_stars = stars_in_data(spark, raw_hdfs_glob)
-    print(f"{len(data_stars)} distinct auids in the raw data")
+def vsx_rows(cfg, data_stars, fetch=True):
+    """VSX rows (auid, name, ra, dec, type) for the stars in `data_stars` (columns auid, data_name).
 
+    Reads the labels CSV in Drive if it exists. Stars not in it are fetched from VizieR (real
+    data only) and appended to the file, so each new download round only queries its new stars.
+    """
+    cols = ["auid", "name", "ra", "dec", "type"]
+    vsx = pd.DataFrame(columns=cols)
     if os.path.exists(cfg.labels_file):
         print(f"Using existing labels file {cfg.labels_file}")
         vsx = pd.read_csv(cfg.labels_file)
         vsx.columns = [c.strip().lower() for c in vsx.columns]
         vsx = vsx.rename(columns={"raj2000": "ra", "dej2000": "dec"})
-    else:
-        if cfg.dataset != "real":
-            raise FileNotFoundError(cfg.labels_file)
-        queries = pd.DataFrame({"auid": data_stars["auid"], "queried_name": data_stars["data_name"]})
-        print(f"Fetching {len(queries)} stars from VizieR B/vsx (1 s between requests)")
-        vsx = queries.merge(fetch_vsx(list(queries["queried_name"])), on="queried_name", how="inner")
-        os.makedirs(os.path.dirname(cfg.labels_file), exist_ok=True)
-        vsx[["auid", "name", "ra", "dec", "type"]].to_csv(cfg.labels_file, index=False)
-        print(f"saved {cfg.labels_file}")
+        if "auid" not in vsx.columns:  # hand-exported VizieR file: match on name
+            m = dict(zip(data_stars["data_name"].map(norm_name), data_stars["auid"]))
+            vsx["auid"] = vsx["name"].map(lambda n: m.get(norm_name(n)))
+        vsx = vsx[cols]
+    elif cfg.dataset != "real":
+        raise FileNotFoundError(cfg.labels_file)
 
-    if "auid" not in vsx.columns:  # hand-exported VizieR file: match on name
-        m = dict(zip(data_stars["data_name"].map(norm_name), data_stars["auid"]))
-        vsx["auid"] = vsx["name"].map(lambda n: m.get(norm_name(n)))
+    missing = data_stars[~data_stars["auid"].isin(set(vsx["auid"].dropna()))]
+    if len(missing) and fetch and cfg.dataset == "real":
+        print(f"Fetching {len(missing)} stars not yet in the labels file from VizieR B/vsx (1 s between requests)")
+        try:
+            got = fetch_vsx(list(missing["data_name"]))
+        except ImportError as exc:
+            print(f"WARNING: cannot query VizieR ({exc}); these stars stay without a VSX type")
+            got = pd.DataFrame(columns=["queried_name", "name", "ra", "dec", "type"])
+        new = missing.rename(columns={"data_name": "queried_name"})[["auid", "queried_name"]]             .merge(got, on="queried_name", how="inner")[cols]
+        if len(new):
+            vsx = pd.concat([vsx, new], ignore_index=True)
+            os.makedirs(os.path.dirname(cfg.labels_file), exist_ok=True)
+            vsx.to_csv(cfg.labels_file, index=False)
+            print(f"saved {cfg.labels_file} (+{len(new)} stars)")
+    return vsx.dropna(subset=["auid"]).drop_duplicates("auid")
 
-    out = data_stars.merge(vsx[["auid", "name", "ra", "dec", "type"]], on="auid", how="left")
+
+def assign_labels(data_stars, vsx, label_map, edges):
+    """Join stars to their VSX rows and add primary_type, label (1/0/<NA>) and sky_region.
+
+    Returns (labels, unmatched). `unmatched` lists every star that gets no label, with the reason,
+    and each one is printed.
+    """
+    out = data_stars[["auid", "data_name"]].merge(vsx[["auid", "name", "ra", "dec", "type"]], on="auid", how="left")
     seps = label_map.get("type_separators", DEFAULT_SEPARATORS)
     out["primary_type"] = out["type"].map(lambda t: primary_type(t, seps))
     out["label"] = out["type"].map(lambda t: label_for(t, label_map)).astype("Int64")
     out["sky_region"] = out["dec"].map(lambda d: sky_region(d, edges))
     out = out.rename(columns={"type": "vsx_type"})[
         ["auid", "data_name", "name", "ra", "dec", "vsx_type", "primary_type", "label", "sky_region"]]
-    missing = out[out["vsx_type"].isna()]
-    if len(missing):
-        print(f"WARNING: {len(missing)} stars have no VSX match: {list(missing['data_name'])}")
+    un = out[out["label"].isna()].copy()
+    un["reason"] = un["vsx_type"].isna().map({True: "no VSX match", False: "primary type not in label map"})
+    un = un[["auid", "data_name", "name", "vsx_type", "primary_type", "reason"]].reset_index(drop=True)
+    if len(un):
+        print(f"WARNING: {len(un)} stars are unlabelled (excluded from supervised training):")
+        for _, r in un.iterrows():
+            print(f"  {r['auid']}  {r['data_name']!s:14s} vsx_type={r['vsx_type']!s:14s} "
+                  f"primary={r['primary_type']!s:8s} -> {r['reason']}")
+    return out, un
+
+
+def build_labels(spark, cfg, raw_paths):
+    from .spark_session import save_csv, save_hive_table
+    label_map = cfg.load_yaml("label_map")
+    edges = cfg.section("ingest")["dec_band_edges"]
+    data_stars = stars_in_data(spark, raw_paths)
+    print(f"{len(data_stars)} distinct auids in the raw data")
+    out, unmatched = assign_labels(data_stars, vsx_rows(cfg, data_stars), label_map, edges)
+    save_csv(unmatched, cfg, "unmatched_vsx_types.csv")
     sdf = spark.createDataFrame(out.astype(object).where(out.notna(), None),
                                 "auid STRING, data_name STRING, name STRING, ra DOUBLE, dec DOUBLE, "
                                 "vsx_type STRING, primary_type STRING, label INT, sky_region STRING")

@@ -1,7 +1,10 @@
-"""Step 1 — Ingestion & storage (owner: Idhazhya).
+"""Step 1 — Ingestion & storage.
 
 What it does:
-  1. `hdfs dfs -put` the raw AAVSO CSV files from Drive into HDFS /<base>/raw/.
+  1. Finds every *.csv under the configured data folder (recursively; ZIPs, other files and
+     DOWNLOAD_LOG/ ignored), skips and lists any file whose header is not the AAVSO export
+     header, and `hdfs dfs -put`s the accepted files into HDFS /<base>/raw/, keeping their
+     sub-folders (so two rounds may contain files with the same name).
   2. Builds the star labels table (VSX types, coordinates, sky_region) — see labels.py.
   3. Reads the CSVs in Spark with an explicit schema (every column named; text read
      first and then cast, so blanks and "NA" become nulls instead of crashing).
@@ -14,10 +17,9 @@ What it does:
   7. Produces the Review 2 "Dataset" slide tables and the observations-per-star chart.
 
 Why: HDFS gives distributed, fault-tolerant storage; Parquet is columnar and compressed,
-so later steps read only the columns they need; Hive gives every team member (and the
+so later steps read only the columns they need; Hive gives every step (and the
 Hive CLI) the same named tables; partitioning lets queries skip whole folders.
 """
-import glob
 import os
 
 import pandas as pd
@@ -25,11 +27,8 @@ from pyspark.sql import types as T
 
 from . import plots
 from .labels import build_labels
+from .rawfiles import RAW_COLUMNS, discover
 from .spark_session import hdfs, save_csv
-
-RAW_COLUMNS = ["#", "target", "auid", "jd", "mag", "uncertainty", "fainterthan", "band", "type",
-               "observer", "airmass", "transformed", "comp1_c", "cmag", "comp2_k", "kmag",
-               "chart", "commentcode", "comments"]
 # Read every column as text with an explicit schema, then cast in Spark SQL.
 RAW_SCHEMA = T.StructType([T.StructField(c, T.StringType(), True) for c in RAW_COLUMNS])
 
@@ -53,7 +52,7 @@ SELECT CAST(`#` AS BIGINT)            AS row_num,
        TRIM(chart)                     AS chart,
        UPPER(TRIM(commentcode))        AS commentcode,
        comments,
-       regexp_extract(input_file_name(), '[^/]+$', 0) AS source_file
+       regexp_extract(input_file_name(), '/raw/(.*)$', 1) AS source_file
 FROM raw_csv
 """
 
@@ -63,29 +62,32 @@ OBS_DDL_COLUMNS = """row_num BIGINT, target STRING, auid STRING, jd DOUBLE, mag 
   comments STRING, source_file STRING"""
 
 
-def read_raw(spark, raw_glob):
-    """Read AAVSO CSVs with the explicit all-text schema. multiLine keeps a quoted comment that
-    contains a line break inside its own record (real exports contain such comments)."""
-    return spark.read.csv(raw_glob, schema=RAW_SCHEMA, header=True, quote='"', escape='"',
+def read_raw(spark, raw_paths):
+    """Read AAVSO CSVs (a path, glob or list of paths) with the explicit all-text schema. multiLine
+    keeps a quoted comment that contains a line break inside its own record (real exports have them)."""
+    return spark.read.csv(raw_paths, schema=RAW_SCHEMA, header=True, quote='"', escape='"',
                           multiLine=True, mode="PERMISSIVE")
 
 
 def put_raw_files(cfg):
-    files = sorted(glob.glob(os.path.join(cfg.raw_dir, "*.csv")))
+    """Copy the accepted CSVs into HDFS <base>/raw/<same sub-folders>; return their HDFS URIs."""
+    root, files, skipped = discover(cfg)
+    save_csv(pd.DataFrame(skipped, columns=["file", "reason", "header_found"]), cfg, "skipped_files.csv")
     if not files:
-        raise FileNotFoundError(f"No CSV files in {cfg.raw_dir}")
+        raise FileNotFoundError(f"No usable AAVSO CSV files under {root}")
     dest = f"{cfg.hdfs_base}/raw"
-    hdfs("-mkdir", "-p", dest)
-    hdfs("-put", "-f", *files, dest + "/")
-    hdfs("-ls", "-h", dest)
-    return cfg.hdfs_uri(dest + "/*.csv")
-
-
-def check_header(spark, raw_glob):
-    found = [c.strip() for c in spark.read.option("header", True).csv(raw_glob).columns]
-    if [c.lower() for c in found] != RAW_COLUMNS:
-        raise ValueError("Raw CSV header does not match the expected AAVSO export.\n"
-                         f"expected: {RAW_COLUMNS}\nfound:    {found}")
+    hdfs("-rm", "-r", "-f", "-skipTrash", dest)  # start clean: removed or skipped files must not linger
+    by_dir = {}
+    for f in files:
+        by_dir.setdefault(os.path.dirname(os.path.relpath(f, root)).replace(os.sep, "/"), []).append(f)
+    uris = []
+    for rel_dir, group in sorted(by_dir.items()):
+        d = f"{dest}/{rel_dir}" if rel_dir else dest
+        hdfs("-mkdir", "-p", d)
+        hdfs("-put", "-f", *group, d + "/")
+        uris += [cfg.hdfs_uri(f"{d}/{os.path.basename(f)}") for f in group]
+    hdfs("-ls", "-R", "-h", dest)
+    return uris
 
 
 def scan_metrics(df):
@@ -171,11 +173,10 @@ def dataset_summary(spark, cfg):
 
 def run(spark, cfg):
     base = cfg.hdfs_base
-    raw_glob = put_raw_files(cfg)
-    check_header(spark, raw_glob)
-    build_labels(spark, cfg, raw_glob)
+    raw_paths = put_raw_files(cfg)  # header-checked files only
+    build_labels(spark, cfg, raw_paths)
 
-    read_raw(spark, raw_glob).createOrReplaceTempView("raw_csv")
+    read_raw(spark, raw_paths).createOrReplaceTempView("raw_csv")
     edges = cfg.section("ingest")["dec_band_edges"]
     typed = spark.sql(TYPED_SELECT)
     typed.createOrReplaceTempView("typed")

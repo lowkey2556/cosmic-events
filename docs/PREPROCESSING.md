@@ -3,7 +3,7 @@
 *(Review 2, slide 4.)* Each step names the tool it uses and why. Row counts after every step
 are logged (Hive table `preprocess_log`, file `preprocess_row_counts.csv`).
 
-## Step 1: Ingestion and storage (owner: Idhazhya)
+## Step 1: Ingestion and storage
 
 | What | Tool | Why |
 |---|---|---|
@@ -12,10 +12,10 @@ are logged (Hive table `preprocess_log`, file `preprocess_row_counts.csv`).
 | Read the CSVs with an **explicit schema** (every column named; read as text, then cast) | **Spark** | Blank uncertainties and `NA` comparison stars become nulls instead of crashing the job |
 | Add `obs_year` (from the Julian Date) and `sky_region` (declination band from VSX; `UNKNOWN` if missing) | **Spark SQL** | These become the partition columns |
 | Write **Parquet + Snappy**, partitioned by `obs_year` / `sky_region` | **Spark → HDFS** | Columnar and compressed, so a query reads only the columns and folders it needs |
-| Register the **external** Hive table `observations_raw` on that HDFS folder (`MSCK REPAIR TABLE` discovers the partitions) | **Hive metastore** | Every teammate, Spark and the Hive CLI see one named table. "External" means dropping the table never deletes the data. |
+| Register the **external** Hive table `observations_raw` on that HDFS folder (`MSCK REPAIR TABLE` discovers the partitions) | **Hive metastore** | Spark and the Hive CLI see one named table. "External" means dropping the table never deletes the data. |
 | Run the same year-restricted query on the partitioned table and on an unpartitioned copy (`observations_flat`), reading the **files and bytes actually scanned** from Spark's query metrics | **Spark SQL** | Evidence that partition pruning skips whole folders. **Bytes scanned** is the meaningful number. *Files* scanned can be higher for the partitioned table, because each partition folder holds its own small file, while the unpartitioned copy has a few large ones. We report both as measured. |
 
-## Step 2: Preprocessing, all in Spark SQL (owner: Sanjhana)
+## Step 2: Preprocessing, all in Spark SQL
 
 1. **Deduplicate** on `(auid, jd, band, observer, mag)`. The same report submitted twice would
    otherwise count double. We use `ROW_NUMBER()` over that key and keep the first.
@@ -40,7 +40,7 @@ are logged (Hive table `preprocess_log`, file `preprocess_row_counts.csv`).
 Output: Hive table `obs_clean` (one row per usable detection, with `mag_norm` and a unique
 `obs_id`).
 
-## Step 3: Observer agreement score (owner: Sanjhana)
+## Step 3: Observer agreement score
 
 See [PROPOSED_MODEL.md](PROPOSED_MODEL.md). This is a **Spark SQL self-join** of `obs_clean`
 with itself on `(auid, band)`, restricted to `|Δt| ≤ 1 day` and different observers. To keep
@@ -49,17 +49,17 @@ neighbouring buckets (a fast equi-join). The exact `|Δt|` test is then applied.
 MADs are computed with Spark SQL `percentile`. Outputs: Hive tables `observer_residuals` and
 `observer_scores`.
 
-## Step 4: Features (owner: Rojashree)
+## Step 4: Features
 
 One row per star, built with Spark SQL aggregates. The Lomb–Scargle periodogram (astropy) runs
 **per star inside Spark** with `groupBy("auid").applyInPandas(...)`, so it is parallel across
 stars and the full dataset is never collected to the driver. Output: Hive table `star_features`.
 
-## Step 5: Classification (owner: Rojashree)
+## Step 5: Classification
 
 See [CLASSIFICATION.md](CLASSIFICATION.md).
 
-## Step 6: K-Means (owner: Lok)
+## Step 6: K-Means
 
 All stars, including unlabelled ones, are clustered with **Spark MLlib K-Means** on the
 standardised baseline features. k = 2..8 is chosen by silhouette score. The clusters are

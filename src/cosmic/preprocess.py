@@ -1,4 +1,4 @@
-"""Step 2 — Preprocessing (owner: Sanjhana). Everything here is Spark SQL.
+"""Step 2 — Preprocessing. Everything here is Spark SQL.
 
 What it does, in order (row counts are logged after every step into the Hive table
 `preprocess_log`):

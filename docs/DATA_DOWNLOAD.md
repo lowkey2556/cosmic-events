@@ -13,9 +13,9 @@ form.
 
 - **Stars:** the 44 stars below (also in `config/stars.yaml`). 22 are eruptive or cataclysmic and
   22 are regular periodic, all heavily observed, so observers overlap.
-- **Date range for every star:** **2021-01-01 to 2023-12-31** (JD 2459215.5 to 2460310.5).
-  Three years keeps the files manageable, gives at least a few Mira cycles, and still yields
-  hundreds to tens of thousands of rows per star. If a file is enormous (T CrB and SS Cyg can be),
+- **Date ranges:** the data arrives in rounds: January 2025 (the existing files), then
+  February–December 2025, then 2024, then 2026, then 2023. Each round goes in its own
+  sub-folder (see below). If a file is enormous (T CrB and SS Cyg can be),
   that's fine: Step 2 thins dense CCD time series.
 
 | # | Eruptive / cataclysmic | | # | Regular periodic |
@@ -43,16 +43,15 @@ form.
 | 21 | Z And | | 43 | g Her |
 | 22 | AG Dra | | 44 | Z UMa |
 
-¹ T CrB's VSX type is a recurrent nova (`NR`), which is **not** in your label map. It will be
-unlabelled: kept for K-Means but excluded from training. If you want it labelled, add `NR` to
-`anomalous` in `config/label_map.yaml` **before** running, and say so in the report.
+¹ T CrB's VSX type is a recurrent nova (`NR`). `NR` is in the `anomalous` list of
+`config/label_map.yaml`, so T CrB is labelled anomalous.
 
 ## Form settings (AAVSO website → Data → Data Download / "Search and download data")
 
 For each star:
 
 1. **Star name:** exactly as in the table (e.g. `SS Cyg`).
-2. **Start date:** `2021-01-01` · **End date:** `2023-12-31`.
+2. **Start / end date:** the dates of the current download round.
 3. **Bands:** all bands. **Observation types:** all (Visual, CCD, DSLR, PEP…).
 4. **Include fainter-than (non-detection) observations:** yes.
 5. **Include discrepant observations:** no, if the form offers this option.
@@ -66,18 +65,28 @@ Any file names work (the pipeline identifies stars by `auid`, not by file name),
 #,target,auid,jd,mag,uncertainty,fainterthan,band,type,observer,airmass,transformed,comp1_c,cmag,comp2_k,kmag,chart,commentcode,comments
 ```
 
-Step 1 checks this and stops with a clear error if it differs. If your export has different
-columns, paste the header to me and I'll adapt the reader. Please don't edit the files by hand.
+The dataset audit and Step 1 check the header of **every** file. A file whose header differs is
+**skipped** (never re-mapped by guesswork) and listed in `audit_skipped_files.csv` /
+`skipped_files.csv`. Please don't edit the files by hand.
 
 ## Where to put the files in Google Drive
 
+The CSVs live under one **data root** folder, in one sub-folder per download round. The
+pipeline searches it recursively. Only `*.csv` files are read: ZIPs and other files are
+ignored, and so is any folder named `DOWNLOAD_LOG`.
+
 ```
 MyDrive/
+├── <data root>/             <- set as DATA_ROOT in the notebook (or COSMIC_DATA_ROOT / data_root)
+│   ├── EXISTING/            <- January 2025 files
+│   ├── NEW_2025/            <- one sub-folder per round; any depth and file names work
+│   ├── NEW_2024/
+│   ├── ...
+│   └── DOWNLOAD_LOG/        <- ignored
 └── cosmic/
-    ├── raw/                 <- the 44 CSV files go here
-    ├── labels/              <- leave empty: Step 1 fetches VSX rows and writes vsx_labels.csv here
+    ├── labels/              <- Step 1 / the audit fetch VSX rows and write vsx_labels.csv here
     ├── cache/               <- created automatically (Hadoop/Spark/Hive tarballs)
-    └── review2/             <- created automatically (all Review 2 outputs)
+    └── outputs/review2/     <- created automatically (all Review 2 outputs)
 ```
 
 ## Labels (VSX)

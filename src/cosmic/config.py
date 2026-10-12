@@ -4,8 +4,8 @@ What it does: reads config/settings.yaml, applies any `--set key.sub=value`
 overrides from the command line, and resolves the dataset-specific paths
 (real vs synthetic) into one small `Config` object that every step uses.
 
-Why: every path and parameter must live in one YAML file so the whole team can
-see and change them without touching code. Real and synthetic data are kept
+Why: every path and parameter lives in one YAML file, so they can be
+seen and changed without touching code. Real and synthetic data are kept
 apart by construction (different HDFS folder, Hive database and output folder),
 so synthetic results can never leak into the Review 2 deliverables.
 """
@@ -53,7 +53,11 @@ class Config:
 
     @property
     def raw_dir(self):
-        return os.path.join(self.root, self.settings["paths"]["raw_subdir"])
+        """Folder searched recursively for AAVSO CSVs: $COSMIC_DATA_ROOT (real data only),
+        else datasets.<name>.data_root, else <root>/raw."""
+        env = os.environ.get("COSMIC_DATA_ROOT") if self.dataset == "real" else None
+        path = env or self.ds.get("data_root")
+        return self._abs(path) if path else os.path.join(self.root, self.settings["paths"]["raw_subdir"])
 
     @property
     def labels_file(self):
@@ -62,7 +66,7 @@ class Config:
     @property
     def output_dir(self):
         sub = self.ds["output_subdir"]
-        if self.dataset != "real" and sub == "review2":
+        if self.dataset != "real" and "review2" in sub.replace("\\", "/").split("/"):
             raise ValueError("Synthetic outputs must never be written to review2/")
         if self.dataset == "real":
             path = os.path.join(self.root, sub)

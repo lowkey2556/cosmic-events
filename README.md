@@ -7,21 +7,25 @@ observations, using each observer's computed reliability as an explicit classifi
 Tree, Naive Bayes, K-Means) · Matplotlib · Tableau. Everything runs on a single-node
 pseudo-distributed cluster **inside Google Colab**.
 
-| Team member | Steps |
+| Step | What |
 |---|---|
-| Idhazhya | 1. Ingestion and storage (HDFS, Parquet, Hive external table, partition pruning) |
-| Sanjhana | 2. Preprocessing (Spark SQL) · 3. Observer agreement score |
-| Rojashree | 4. Features · 5. Classification · 8. Robustness (Milestone 2) |
-| Lok | 6. K-Means · 7. Scalability · 9. Tableau and final report (Milestone 2) |
+| 0 | Dataset audit (sizes, rows, stars, observers, coverage, class balance, skipped files) |
+| 1 | Ingestion and storage (HDFS, Parquet, Hive external table, partition pruning) |
+| 2 | Preprocessing (Spark SQL) |
+| 3 | Observer agreement score |
+| 4 | Features |
+| 5 | Classification |
+| 6 | K-Means |
 
 ## Open the notebook
 
-1. Put the AAVSO CSVs in `MyDrive/cosmic/raw/` (see [docs/DATA_DOWNLOAD.md](docs/DATA_DOWNLOAD.md)).
+1. Put the AAVSO CSVs in sub-folders of one Drive data folder (see [docs/DATA_DOWNLOAD.md](docs/DATA_DOWNLOAD.md))
+   and set `DATA_ROOT` in the notebook's first configuration cell.
 2. Open `notebooks/cosmic_colab.ipynb` in Colab (**File → Open notebook → GitHub**, paste the repo URL).
 3. In the second code cell, set `REPO_URL` to this repository.
 4. **Runtime → Run all.** The notebook mounts Drive, installs and starts the stack, runs the five
    smoke tests and then Steps 1–6, and shows every Review 2 table and figure inline. Outputs are also saved to
-   `MyDrive/cosmic/review2/`.
+   `MyDrive/cosmic/outputs/review2/`.
 5. To share: **File → Save** (keep the outputs), then **Share → Anyone with the link → Viewer**.
 
 ## Restart the stack after a Colab reset

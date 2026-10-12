@@ -1,4 +1,4 @@
-"""Step 4 — Feature engineering (owner: Rojashree). One row per star.
+"""Step 4 — Feature engineering. One row per star.
 
 What it does:
   Baseline (observer-agnostic) features, from the band-normalised detections:

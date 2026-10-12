@@ -1,14 +1,13 @@
 # Fixed, balanced star list for the AAVSO downloads (44 stars).
 # expected_type is only a guide; the label actually used comes from VSX at run time.
-# Suggested date range for every file: 2021-01-01 to 2023-12-31 (JD 2459215.5 - 2460310.5).
-date_range: {start: "2021-01-01", end: "2023-12-31"}
+# Download list used for Milestone 1. Data now arrives in rounds (2023-2026); see docs/DATA_DOWNLOAD.md.
 
 eruptive:
   - {n: 1,  name: SS Cyg,   expected_type: UGSS}
   - {n: 2,  name: U Gem,    expected_type: UGSS}
   - {n: 3,  name: Z Cam,    expected_type: UGZ}
   - {n: 4,  name: RU Peg,   expected_type: UGSS}
-  - {n: 5,  name: T CrB,    expected_type: NR (not in label map -> unlabelled, K-Means only)}
+  - {n: 5,  name: T CrB,    expected_type: NR}
   - {n: 6,  name: SU UMa,   expected_type: UGSU}
   - {n: 7,  name: AM Her,   expected_type: AM}
   - {n: 8,  name: YZ Cnc,   expected_type: UGSU}

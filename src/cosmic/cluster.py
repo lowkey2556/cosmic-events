@@ -1,4 +1,4 @@
-"""Step 6 — K-Means clustering (owner: Lok). Spark MLlib.
+"""Step 6 — K-Means clustering. Spark MLlib.
 
 What it does: clusters ALL stars — including those whose VSX type is not in the label
 map — on the standardised BASELINE features (median-imputed, then scaled; both fitted

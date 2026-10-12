@@ -1,8 +1,9 @@
 # Per-star binary label from the VSX primary type (text before the first separator below).
-anomalous: [UG, UGSS, UGSU, UGZ, N, NA, NB, NL, ZAND, RCB, FUOR, UV, AM]
+# NR = recurrent nova (e.g. T CrB); UGWZ = WZ Sge-type dwarf nova (e.g. WZ Sge).
+anomalous: [UG, UGSS, UGSU, UGZ, UGWZ, N, NA, NB, NR, NL, ZAND, RCB, FUOR, UV, AM]
 normal:    [M, SRA, SRB, SR, EA, EB, EW, RRAB, RRC, DCEP, CEP, DSCT, BY]
-# unlisted -> excluded from supervised training, kept for K-Means
-# Separators that end the primary type. The original spec listed ':', '+' and '|'. '/' was added
-# because VSX also writes combined types with it (RRAB/BL, EA/SD, EW/KW, UGZ/IW, NL/VY, NA/DQ+UG).
-# Without '/', those stars would be unlabelled. Delete '/' to follow the original rule exactly.
+# Unlisted types -> excluded from supervised training (kept for K-Means). Every such star is
+# printed and saved to unmatched_vsx_types.csv so nothing is dropped silently.
+# Separators that end the primary type. VSX writes combined types with any of these
+# (UGSS+E, SRB:, ZAND|SR, RRAB/BL, NL/VY -> UGSS, SRB, ZAND, RRAB, NL).
 type_separators: [":", "+", "|", "/"]

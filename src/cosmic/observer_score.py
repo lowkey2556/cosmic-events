@@ -1,4 +1,4 @@
-"""Step 3 — Observer agreement score (owner: Sanjhana). The novel part of the project.
+"""Step 3 — Observer agreement score. The novel part of the project.
 
 What it does, for every observation of star s, band b, time t by observer k:
   1. Leave-one-out consensus = median mag_norm of the SAME star and band within

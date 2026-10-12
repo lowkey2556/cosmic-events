@@ -1,4 +1,4 @@
-"""Step 5 — Classification (owner: Rojashree). Spark MLlib only.
+"""Step 5 — Classification. Spark MLlib only.
 
 What it does:
   * Uses only stars with a label (anomalous = 1, normal = 0).
