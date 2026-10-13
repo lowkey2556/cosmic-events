@@ -10,6 +10,11 @@ import sys
 
 import pytest
 
+try:  # load PyTorch before PySpark/PyArrow: on Windows, torch's DLLs fail to load if they come second
+    import torch  # noqa: F401
+except ImportError:
+    pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -20,6 +25,9 @@ def spark():
     # use pip PySpark's local mode and the local filesystem, not the cluster's configuration
     for var in ("SPARK_HOME", "HADOOP_CONF_DIR", "YARN_CONF_DIR"):
         os.environ.pop(var, None)
+    # local-mode Python workers inherit this, so they can import the cosmic package (get_spark ships a zip
+    # with addPyFile instead; that needs winutils.exe on Windows, so tests use the environment)
+    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (os.path.join(ROOT, "src"), os.environ.get("PYTHONPATH")) if p)
     from pyspark.sql import SparkSession
     s = (SparkSession.builder.master("local[2]").appName("cosmic-tests")
          .config("spark.sql.shuffle.partitions", "4")

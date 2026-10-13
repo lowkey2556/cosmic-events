@@ -70,6 +70,8 @@ python run.py all --data real
 | `start_stack.sh` never returns when its output is piped (a Colab cell would hang) | `(cd X && java ... &)` backgrounds the whole list, leaving a shell holding stdout | `(cd X; setsid java ... </dev/null >log 2>&1 &)` |
 | `toPandas()` fails with `No module named 'distutils'` | PySpark 3.5 imports `distutils`, which Python 3.12 removed | `setuptools` in requirements.txt provides the shim |
 | PySpark/pandas errors with pandas 3.x | PySpark 3.5 predates pandas 3 | `pandas>=2.0,<3` (Colab ships 2.2) |
+| Local tests on Windows: "Python worker exited unexpectedly (crashed)" for any Python UDF | a Windows worker bug in pip PySpark 3.5.4 | use PySpark 3.5.9 (the version pinned in requirements.txt) |
+| Local tests on Windows: torch fails to load `c10.dll` (WinError 1114) | torch's DLLs must load before PyArrow's | `tests/conftest.py` imports torch first; in the pipeline RGA-Net runs in its own process anyway |
 | Hive `SELECT ... ORDER BY` hangs on a small machine | Hive launches a MapReduce job; its 1.5 GB ApplicationMaster left no room for a map container | MapReduce AM/map/reduce containers set to 512 MB in `mapred-site.xml`; smoke test 5 uses a plain `SELECT` (a fetch task, no MapReduce) |
 
 ## Verified
@@ -78,7 +80,14 @@ On 2026-10-11, on the WSL test machine (non-root, 3.7 GB RAM, YARN 2 GB), these 
 - `install_stack.sh` and `start_stack.sh` completed; the start took about 1 minute.
 - Smoke tests 1–5 all passed.
 - `pytest` passed 11 of 11 tests.
-- `python run.py all --data synthetic` ran the Spark steps on YARN, with every table readable from the Hive CLI.
+- `python run.py milestone1 --data synthetic` (the six steps that existed then) ran on YARN, with every
+  table readable from the Hive CLI.
+
+On 2026-10-13, on a Windows 11 laptop (local-mode Spark 3.5.9 from pip, Java 8, Python 3.12, PyTorch CPU;
+no HDFS, YARN or Hive), `pytest` passed 34 of 34 tests, including the Spark windowing, the Spark MLlib
+models on windows, the star-attrition table, RGA-Net training with its ablations, and the comparison step.
+The full pipeline on YARN with the new steps (windowing, ML models, RGA-Net, comparison, scalability) had
+not yet been run at that point; its first run is the Colab run on the real data.
 
 None of this used real data, and none of it produced Review 2 outputs.
 
