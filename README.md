@@ -36,8 +36,10 @@ Docs: [PROPOSED_MODEL](docs/PROPOSED_MODEL.md) · [CLASSIFICATION](docs/CLASSIFI
 
 **Step-by-step guide: [docs/COLAB_GUIDE.md](docs/COLAB_GUIDE.md).**
 
-1. The AAVSO CSVs live in `MyDrive/cosmic_roja/` (sub-folders `raw/`, `existing/`, read recursively);
-   see [docs/DATA_DOWNLOAD.md](docs/DATA_DOWNLOAD.md).
+1. Every path comes from one setting, `PROJECT_ROOT` = `MyDrive/cosmic_roja`. The AAVSO CSVs go
+   **directly in `cosmic_roja/data/`**; results go to `outputs/review2/`; models, labels and the stack's
+   tarball cache to `work/` (see [docs/DATA_DOWNLOAD.md](docs/DATA_DOWNLOAD.md)). The old `MyDrive/cosmic`
+   folder is never used: the notebook stops if a path points there.
 2. Open <https://colab.research.google.com/github/lowkey2556/cosmic-events/blob/main/notebooks/cosmic_colab.ipynb>
    and choose a **T4 GPU** runtime.
 3. **Runtime → Run all.** The notebook mounts Drive, runs the audit, installs and starts the stack,
@@ -47,8 +49,8 @@ Docs: [PROPOSED_MODEL](docs/PROPOSED_MODEL.md) · [CLASSIFICATION](docs/CLASSIFI
 
 ## Restart the stack after a Colab reset
 
-A reset wipes the VM, but Drive keeps the tarball cache, `cosmic_roja/work/` (window tensors,
-predictions) and the outputs. Just **Run all** again. If only the kernel restarted (the VM is still
+A reset wipes the VM, but Drive keeps `cosmic_roja/work/` (tarball cache, labels, window tensors,
+models, predictions) and the outputs. Just **Run all** again. If only the kernel restarted (the VM is still
 alive), run `bash setup/start_stack.sh` (it starts only what is not running) and the
 "load the stack's environment" cell. `bash setup/stop_stack.sh` stops everything.
 RGA-Net and the comparison need no stack: after a reset they can be re-run straight from `work/`.

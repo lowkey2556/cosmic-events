@@ -19,7 +19,7 @@ SPARK, STORE, PY, TORCH, VIZ, LATER = "#e8f0fb", "#fdf0e9", "#f3f2ee", "#efeafb"
 
 NODES = [
     # id, tool (bold), what it does, fill
-    ("drive", "Google Drive", "AAVSO CSV exports (cosmic_roja/raw, existing)<br/>+ VSX types (VizieR)", PY),
+    ("drive", "Google Drive", "AAVSO CSV exports (cosmic_roja/data)<br/>+ VSX types (VizieR)", PY),
     ("audit", "Python — Step 0", "dataset audit: MB, rows, stars,<br/>50 MB check, header check", PY),
     ("hdfs", "Hadoop HDFS", "/cosmic/raw/&lt;sub-folder&gt;/*.csv", STORE),
     ("ingest", "Spark on YARN — Step 1", "explicit-schema read → Parquet + Snappy<br/>partitioned by obs_year / sky_region", SPARK),

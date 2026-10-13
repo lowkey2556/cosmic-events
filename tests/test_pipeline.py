@@ -58,31 +58,73 @@ def _write(path, text):
         fh.write(text)
 
 
-def test_recursive_discovery_and_header_check(tmp_path):
-    from cosmic.rawfiles import RAW_COLUMNS, check_headers, find_csv_files
-    good = ",".join(RAW_COLUMNS) + "\n1,SS CYG,000-BCP-220,2460676.6,12.5,0.05,False,V,CCD,ABC,,,,,,,,,\n"
-    root = str(tmp_path)
-    _write(os.path.join(root, "AAVSO_DATA", "EXISTING", "a.csv"), good)
-    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "a.csv"), good)          # same name, other round
-    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "b.CSV"), "﻿" + good)  # BOM, upper-case extension
-    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "bad.csv"), "star,date,mag\nx,1,2\n")
-    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "empty.csv"), "")
-    _write(os.path.join(root, "AAVSO_DATA", "DOWNLOAD_LOG", "log.csv"), good)
-    _write(os.path.join(root, "AAVSO_DATA", "NEW_2025", "x.zip"), "zip")
-    files = find_csv_files(root)
-    rel = sorted(os.path.relpath(f, root).replace(os.sep, "/") for f in files)
-    assert rel == ["AAVSO_DATA/EXISTING/a.csv", "AAVSO_DATA/NEW_2025/a.csv", "AAVSO_DATA/NEW_2025/b.CSV",
-                   "AAVSO_DATA/NEW_2025/bad.csv", "AAVSO_DATA/NEW_2025/empty.csv"]
-    ok, skipped = check_headers(files, root)
-    assert len(ok) == 3
-    assert sorted(os.path.basename(s["file"]) for s in skipped) == ["bad.csv", "empty.csv"]
 
 
-def test_data_root_override(monkeypatch):
-    from cosmic.config import load_config
-    monkeypatch.setenv("COSMIC_DATA_ROOT", "/content/drive/MyDrive/X")
-    assert load_config("real").raw_dir == "/content/drive/MyDrive/X"
-    assert load_config("synthetic").raw_dir.replace(os.sep, "/").endswith("data/synthetic/raw")  # env is real-only
+
+def _good():
+    from cosmic.rawfiles import RAW_COLUMNS
+    return ",".join(RAW_COLUMNS) + "\n1,SS CYG,000-BCP-220,2460676.6,12.5,0.05,False,V,CCD,ABC,,,,,,,,,\n"
+
+
+def test_flat_data_folder_and_header_check(tmp_path):
+    from cosmic.rawfiles import check_headers, list_csv_files
+    d = str(tmp_path / "data")
+    _write(os.path.join(d, "a.csv"), _good())
+    _write(os.path.join(d, "b.CSV"), "﻿" + _good())                 # BOM, upper-case extension
+    _write(os.path.join(d, "bad.csv"), "star,date,mag\nx,1,2\n")
+    _write(os.path.join(d, "empty.csv"), "")
+    _write(os.path.join(d, "x.zip"), "zip")                              # not a CSV: ignored
+    files = list_csv_files(d)
+    assert sorted(os.path.basename(f) for f in files) == ["a.csv", "b.CSV", "bad.csv", "empty.csv"]
+    ok, skipped = check_headers(files, d)
+    assert len(ok) == 2
+    assert sorted(s["file"] for s in skipped) == ["bad.csv", "empty.csv"]
+
+
+def test_data_folder_stops_on_subfolders_and_duplicate_names(tmp_path):
+    from cosmic.rawfiles import list_csv_files
+    d = tmp_path / "data"
+    _write(str(d / "a.csv"), _good())
+    _write(str(d / "raw" / "b.csv"), _good())                            # old layout: CSVs in a sub-folder
+    with pytest.raises(ValueError, match="sub-folders"):
+        list_csv_files(str(d))
+    os.remove(d / "raw" / "b.csv")
+    os.rmdir(d / "raw")
+    assert len(list_csv_files(str(d))) == 1
+    _write(str(d / "A.CSV"), _good())                                    # same name as a.csv apart from case
+    names = os.listdir(d)
+    if len({n.lower() for n in names}) < len(names):                     # both exist (case-sensitive file system, as on Colab)
+        with pytest.raises(ValueError, match="Duplicate file names"):
+            list_csv_files(str(d))
+    with pytest.raises(FileNotFoundError):
+        list_csv_files(str(tmp_path / "missing"))
+
+
+def test_every_path_derives_from_project_root(monkeypatch, tmp_path):
+    from cosmic.config import check_paths, load_config
+    monkeypatch.setenv("COSMIC_PROJECT_ROOT", str(tmp_path))
+    cfg = load_config("real")
+    p = {k: v.replace(os.sep, "/") for k, v in cfg.paths().items()}
+    root = str(tmp_path).replace(os.sep, "/")
+    assert p == {"PROJECT_ROOT": root, "data (CSVs)": root + "/data", "outputs": root + "/outputs/review2",
+                 "work": root + "/work", "VSX labels file": root + "/work/labels/vsx_labels.csv",
+                 "tarball cache": root + "/work/cache"}
+    with pytest.raises(FileNotFoundError, match="data folder does not exist"):
+        check_paths(cfg)                                                  # data/ missing
+    (tmp_path / "data").mkdir()
+    check_paths(cfg)
+    assert load_config("synthetic").data_dir.replace(os.sep, "/").endswith("data/synthetic/raw")  # env is real-only
+
+
+@pytest.mark.parametrize("root", ["/content/drive/MyDrive/cosmic", "/content/drive/MyDrive/cosmic/",
+                                  "/content/drive/MyDrive/cosmic_OLD_do_not_use"])
+def test_retired_folders_are_refused(monkeypatch, root):
+    from cosmic.config import check_paths, is_retired, load_config
+    monkeypatch.setenv("COSMIC_PROJECT_ROOT", root)
+    with pytest.raises(ValueError, match="retired folder"):
+        check_paths(load_config("real"), need_data=False)
+    assert not is_retired("/content/drive/MyDrive/cosmic_roja/data")    # the new project folder is fine
+    assert is_retired("/content/drive/MyDrive/cosmic/cache/x.tgz")
 
 
 def test_vsx_name_candidates():
@@ -463,7 +505,8 @@ def test_compare_end_to_end_on_synthetic_predictions(tmp_path):
                                               window_id=[f"{a}#{i}" for i, a in enumerate(auid)], label=y,
                                               prob=np.clip(0.4 * y + r.random(n) * 0.6, 0, 1))))
     pred = pd.concat(rows)
-    cfg = load_config("synthetic", [f"datasets.synthetic.output_subdir={tmp_path / 'out'}"])
+    cfg = load_config("synthetic", [f"datasets.synthetic.project_root={tmp_path}",
+                                    f"datasets.synthetic.output_subdir={tmp_path / 'out'}"])
     work = cfg.work_dir
     pred[pred.model == "RGA-Net"].to_csv(os.path.join(work, "predictions_rganet.csv"), index=False)
     pred[pred.model != "RGA-Net"].to_csv(os.path.join(work, "predictions_ml.csv"), index=False)
@@ -508,36 +551,35 @@ def test_audit_on_synthetic(synth_dir, tmp_path):
     from cosmic import audit
     from cosmic.config import load_config
     from cosmic.rawfiles import RAW_COLUMNS
-    root = tmp_path / "data"
-    raw = root / "raw"
-    shutil.copytree(os.path.join(synth_dir, "raw"), raw / "EXISTING")
-    shutil.copytree(os.path.join(synth_dir, "labels"), root / "labels")
-    first = sorted(os.listdir(raw / "EXISTING"))[0]
-    (raw / "NEW_2025").mkdir()
-    shutil.copy(raw / "EXISTING" / first, raw / "NEW_2025" / first)       # an overlapping download
-    (raw / "NEW_2025" / "bad.csv").write_text("star,date\nx,1\n")
-    (raw / "DOWNLOAD_LOG").mkdir()
-    shutil.copy(raw / "EXISTING" / first, raw / "DOWNLOAD_LOG" / "x.csv")
+    data = tmp_path / "data"
+    shutil.copytree(os.path.join(synth_dir, "raw"), data)
+    n_synth = len(os.listdir(data))
+    first = sorted(os.listdir(data))[0]
+    copy = "zz_copy_" + first                                          # read after the original
+    shutil.copy(data / first, data / copy)                             # an overlapping download
+    (data / "bad.csv").write_text("star,date\nx,1\n")
     # one record whose quoted comment contains a line break
     rec = '9,T CrB,000-BBW-825,2460702.9,10.1,0.01,False,V,CCD,SCMA,,,,,,,,,"line one\r\nline two"\n'
-    (raw / "NEW_2025" / "multi.csv").write_bytes((",".join(RAW_COLUMNS) + "\n" + rec).encode())
-    cfg = load_config("synthetic", [f"datasets.synthetic.root={root}", f"datasets.synthetic.output_subdir={tmp_path / 'out'}"])
+    (data / "multi.csv").write_bytes((",".join(RAW_COLUMNS) + "\n" + rec).encode())
+    cfg = load_config("synthetic", [f"datasets.synthetic.project_root={tmp_path}", f"datasets.synthetic.data_subdir={data}",
+                                    f"datasets.synthetic.labels_file={os.path.join(synth_dir, 'labels', 'vsx_labels.csv')}",
+                                    f"datasets.synthetic.output_subdir={tmp_path / 'out'}"])
     r = audit.run(cfg, fetch_vsx=False)
     s = dict(zip(r["summary"]["item"], r["summary"]["value"]))
     files = r["files"].set_index("file")
-    dup_rows = files.loc[f"NEW_2025/{first}", "rows"]
-    assert files.loc[f"NEW_2025/{first}", "repeated_rows"] == dup_rows
-    assert files.loc["NEW_2025/multi.csv", "rows"] == 1
+    dup_rows = files.loc[copy, "rows"]
+    assert files.loc[copy, "repeated_rows"] == dup_rows
+    assert files.loc["multi.csv", "rows"] == 1
     # the copied file repeats all its rows; the synthetic files also contain ~1% exact re-submissions
     assert s["repeated rows (same auid, jd, band, observer, mag)"] == files["repeated_rows"].sum() > dup_rows
-    assert list(r["skipped"]["file"]) == ["NEW_2025/bad.csv"]
-    assert s["csv files accepted"] == len(os.listdir(raw / "EXISTING")) + 2
+    assert list(r["skipped"]["file"]) == ["bad.csv"]
+    assert s["csv files accepted"] == n_synth + 2
     assert s["unique-observation size, MB (repeats across files removed)"] < s["total CSV size, MB (1 MB = 1,048,576 bytes)"]
     assert s["target 50 MB: total size"] == "FAIL"                       # synthetic data is tiny
     # every row is counted once: rows in files = sum of per-star unique rows + repeats
     assert r["stars"]["rows"].sum() + files["repeated_rows"].sum() == s["rows (all files)"]
     # exact bytes: the multi-line record is counted with all its bytes
-    assert audit.iter_records(str(raw / "NEW_2025" / "multi.csv")).__next__()[0] == len(rec.encode())
+    assert audit.iter_records(str(data / "multi.csv")).__next__()[0] == len(rec.encode())
     bal = r["balance"].set_index("class")
     assert bal["stars"].sum() == r["stars"]["auid"].nunique()
     assert bal.loc["unlabelled", "stars"] >= 2                          # the synthetic file has 2 unmatched types
@@ -601,18 +643,16 @@ def test_star_attrition_explains_every_star(spark, windowed, typed_view):
     assert (att[cols].diff(axis=1).iloc[:, 1:] <= 0).all().all()             # counts never grow step to step
 
 
-def test_own_folders_are_never_read_as_data(tmp_path, monkeypatch):
+def test_only_the_data_folder_is_read(tmp_path, monkeypatch):
     from cosmic.config import load_config
-    from cosmic.rawfiles import RAW_COLUMNS, discover
-    monkeypatch.delenv("COSMIC_DATA_ROOT", raising=False)
-    good = ",".join(RAW_COLUMNS) + "\n1,SS CYG,000-BCP-220,2460676.6,12.5,0.05,False,V,CCD,ABC,,,,,,,,,\n"
-    for rel in ("raw/a.csv", "existing/b.csv", "outputs/review2/audit_files.csv", "labels/vsx_labels.csv",
-                "work/splits.csv"):
-        _write(str(tmp_path / rel), good)
-    cfg = load_config("real", [f"datasets.real.root={tmp_path}", f"datasets.real.data_root={tmp_path}"])
-    _, files, skipped = discover(cfg)
+    from cosmic.rawfiles import discover
+    monkeypatch.setenv("COSMIC_PROJECT_ROOT", str(tmp_path))
+    for rel in ("data/a.csv", "data/b.csv", "outputs/review2/audit_files.csv", "work/labels/vsx_labels.csv",
+                "work/splits.csv", "stray.csv"):
+        _write(str(tmp_path / rel), _good())
+    _, files, skipped = discover(load_config("real"))
     rel = sorted(os.path.relpath(f, tmp_path).replace(os.sep, "/") for f in files)
-    assert rel == ["existing/b.csv", "raw/a.csv"] and skipped == []
+    assert rel == ["data/a.csv", "data/b.csv"] and skipped == []
 
 
 def test_underscore_and_padded_names():
@@ -676,3 +716,9 @@ def test_spark_distributed_inference_matches_pytorch(spark, saved_models):
     ref = preds["full"].set_index("window_id")["prob"]
     got = out.set_index("window_id")["prob"]
     assert np.allclose(got.loc[ref.index], ref, atol=1e-5)
+
+
+def test_duplicate_names_detected():
+    from cosmic.rawfiles import duplicate_names
+    assert duplicate_names(["a.csv", "b.csv", "A.CSV", "c.csv"]) == [["a.csv", "A.CSV"]]
+    assert duplicate_names(["observations_1.csv", "observations_2.csv"]) == []

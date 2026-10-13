@@ -1,8 +1,8 @@
 """Step 0 — Dataset audit of the raw AAVSO CSVs (plain Python, runs before the Big Data stack).
 
 What it does:
-  1. Finds every CSV under the data folder exactly as ingestion does (recursive; ZIPs, other
-     files and DOWNLOAD_LOG/ ignored) and skips any file whose header is not the AAVSO export
+  1. Lists the CSVs directly in PROJECT_ROOT/data exactly as ingestion does (stopping on CSVs in
+     sub-folders or duplicate names; ZIPs and other files ignored) and skips any file whose header is not the AAVSO export
      header (listed, never re-mapped).
   2. Reads every accepted file record by record (a quoted comment containing a line break stays
      one record) and reports, per file and in total: size in MB, rows, stars (by `auid`),

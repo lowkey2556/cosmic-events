@@ -2,27 +2,29 @@
 # Any value can be overridden on the command line:  python run.py <step> --set spark.executor_memory=512m
 
 # Two datasets live side by side and never mix: different HDFS base, Hive database and output folder.
+# Every real-data path is derived from ONE setting, PROJECT_ROOT (datasets.real.project_root; the
+# environment variable COSMIC_PROJECT_ROOT overrides it). See `paths:` below for the layout.
+# The retired folders MyDrive/cosmic and cosmic_OLD_do_not_use are refused by the code.
 datasets:
   real:
-    root: /content/drive/MyDrive/cosmic_roja   # Drive project folder: labels/, work/ and outputs/review2/ live here
-    # Folder holding the AAVSO CSVs, searched recursively (currently raw/ = 2024 files, existing/ = Jan 2025).
-    # null = <root>/raw. The environment variable COSMIC_DATA_ROOT overrides this value. The output,
-    # labels and work folders are never scanned for data, even when they sit inside data_root.
-    data_root: /content/drive/MyDrive/cosmic_roja
+    project_root: /content/drive/MyDrive/cosmic_roja   # PROJECT_ROOT
     hdfs_base: /cosmic
     database: cosmic
-    output_subdir: outputs/review2             # Review 2 deliverables (real data only)
-  synthetic:
-    root: data/synthetic                       # relative to the repo; created by scripts/make_synthetic.py
-    data_root: null                            # = data/synthetic/raw
+  synthetic:                                   # test data only (scripts/make_synthetic.py), relative to the repo
+    project_root: synthetic_run
+    data_subdir: data/synthetic/raw            # overrides of the layout below
+    labels_file: data/synthetic/labels/vsx_labels.csv
+    output_subdir: synthetic_run/outputs       # NEVER review2
     hdfs_base: /cosmic_synth
     database: cosmic_synth
-    output_subdir: synthetic_run               # NEVER review2
 
+# Layout under PROJECT_ROOT
 paths:
-  raw_subdir: raw                              # default data_root = <root>/raw
-  labels_file: labels/vsx_labels.csv           # <root>/labels/vsx_labels.csv (VSX rows for our stars)
-  work_subdir: work                            # <root>/work: window tensors exported for PyTorch, predictions
+  data_subdir: data                            # AAVSO CSVs, directly in this folder (sub-folders are not read)
+  output_subdir: outputs/review2               # every Review 2 table and figure
+  work_subdir: work                            # models, window tensors, splits, predictions
+  labels_file: work/labels/vsx_labels.csv      # VSX rows for our stars (fetched from VizieR when missing)
+  cache_subdir: work/cache                     # Hadoop/Spark/Hive tarballs used by setup/install_stack.sh
   star_list: config/stars.yaml
   label_map: config/label_map.yaml
 
@@ -46,8 +48,6 @@ spark:
 ingest:
   # Declination bands (degrees) used for the sky_region partition column.
   dec_band_edges: [-90, -30, 0, 30, 60, 90]
-  # Sub-folders of data_root that are never read (any depth). Only *.csv files are read; ZIPs etc. are ignored.
-  exclude_dirs: [DOWNLOAD_LOG]
   pruning_test_year: null                      # null = the year with the most rows
 
 audit:

@@ -8,14 +8,13 @@ import json
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = "/content/drive/MyDrive/cosmic_roja/outputs/review2"
 
 CELLS = [
     ("md", """# Cosmic Event Crowdsourcing Platform: Review 2
 
 Detects anomalous (eruptive) variable stars in crowdsourced **AAVSO** observations. The proposed model,
-**RGA-Net** (Reliability-Gated Attention Network), is a small Transformer-style network whose attention is gated
-by each observer's measured reliability. It is compared with four Spark MLlib models on the same windows and
+**RGA-Net** (Reliability-Gated Attention Network), is a Transformer encoder (Vaswani et al., 2017) whose attention
+is gated by each observer's measured reliability (the gate is our contribution). It is compared with four Spark MLlib models on the same windows and
 the same 5 star-grouped splits.
 
 **Stack inside this Colab VM:** Hadoop 3.3.6 (HDFS + YARN, pseudo-distributed) · Spark 3.5.9 on YARN · Spark SQL ·
@@ -23,7 +22,8 @@ Hive 3.1.3 metastore · Spark MLlib · PyTorch (RGA-Net only, on the GPU). **Eve
 inline and saved as PNG (slides) + interactive HTML. The architecture diagram is drawn with Graphviz.
 
 Use a **GPU runtime** (Runtime → Change runtime type → T4 GPU). Step-by-step guide: `docs/COLAB_GUIDE.md`.
-Outputs are written to `MyDrive/cosmic_roja/outputs/review2/` and shown at the end of the notebook."""),
+Every path comes from one setting, `PROJECT_ROOT` (`MyDrive/cosmic_roja`): CSVs in `data/`, results in
+`outputs/review2/` (shown at the end of the notebook), models, labels and the tarball cache in `work/`."""),
     ("md", "## 0. Mount Google Drive and get the code"),
     ("code", """from google.colab import drive
 drive.mount('/content/drive')"""),
@@ -35,18 +35,25 @@ else:
     !cd "/content/cosmic" && git pull -q
 %cd /content/cosmic
 !git log --oneline | head -5"""),
-    ("md", """### Data folder
-`DATA_ROOT` is the Drive folder that holds the AAVSO CSVs. It is searched recursively (`raw/`, `existing/`, and any
-sub-folder added later). ZIPs, other files, `DOWNLOAD_LOG/` and the pipeline's own `outputs/`, `labels/` and `work/`
-folders are ignored. Stars are identified by `auid`, never by file name."""),
-    ("code", """DATA_ROOT = "/content/drive/MyDrive/cosmic_roja"   # <- contains raw/ (2024) and existing/ (Jan 2025); read recursively
-import os
-os.environ["COSMIC_DATA_ROOT"] = DATA_ROOT        # every `!python run.py ...` below reads this
-assert os.path.isdir(DATA_ROOT), f"Drive folder not found: {DATA_ROOT}"
-!find "$DATA_ROOT" -maxdepth 1 -type d | sort
-# VSX labels fetched earlier into the old cosmic/ folder are reused (copied once), so they are not fetched again
-!mkdir -p "$DATA_ROOT/labels"
-!test -f "$DATA_ROOT/labels/vsx_labels.csv" || cp -v "/content/drive/MyDrive/cosmic/labels/vsx_labels.csv" "$DATA_ROOT/labels/" 2>/dev/null || true"""),
+    ("md", """### Project folder and path check
+Every path is derived from `PROJECT_ROOT`. The AAVSO CSVs must be **directly inside** `PROJECT_ROOT/data/`
+(only that folder is read). This cell prints the resolved paths and **stops** if `data/` is missing, if any path points
+at the retired folders (`MyDrive/cosmic`, `cosmic_OLD_do_not_use`), if CSVs are in sub-folders of `data/`, or if two
+files have the same name. Stars are identified by `auid`, never by file name."""),
+    ("code", """PROJECT_ROOT = "/content/drive/MyDrive/cosmic_roja"
+import os, sys
+os.environ["COSMIC_PROJECT_ROOT"] = PROJECT_ROOT      # every `!python run.py` and `!bash setup/...` below reads this
+sys.path.insert(0, "/content/cosmic/src")
+from cosmic.config import check_paths, load_config
+from cosmic.rawfiles import list_csv_files
+cfg = load_config("real")
+print("Resolved paths:")
+check_paths(cfg)                          # stops on a retired-folder path or a missing data/ folder
+files = list_csv_files(cfg.data_dir)      # stops on CSVs in sub-folders or duplicate file names
+assert files, f"No CSV files directly in {cfg.data_dir}"
+print()
+print(f"{len(files)} CSV files directly in {cfg.data_dir}, {sum(os.path.getsize(f) for f in files) / 2**20:.1f} MB")
+OUT = cfg.paths()["outputs"]"""),
     ("code", """# GPU check (RGA-Net trains on the GPU if there is one; everything else uses the CPU)
 import torch
 print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "NONE - choose Runtime > Change runtime type > T4 GPU")
@@ -58,8 +65,8 @@ windows; class balance; skipped files; unmatched VSX types. (1 MB = 1,048,576 by
     ("code", """!pip -q install pyyaml astropy astroquery "plotly==5.24.1" "kaleido==0.2.1"
 !python run.py audit --data real"""),
     ("md", """## 1. Install the stack
-Java 8 comes from apt. Hadoop, Spark, Hive and Derby tarballs are cached in `MyDrive/cosmic/cache/`, so a reinstall after
-a Colab reset only extracts them. The first run downloads about 1.5 GB."""),
+Java 8 comes from apt. Hadoop, Spark, Hive and Derby tarballs are cached in `PROJECT_ROOT/work/cache/`, so a reinstall
+after a Colab reset only extracts them. The first run downloads about 1.5 GB."""),
     ("code", """%%time
 !bash setup/install_stack.sh"""),
     ("md", "## 2. Start HDFS, YARN, the Derby network server and the Hive metastore"),
@@ -143,7 +150,7 @@ Re-runs preprocessing + windowing 9 times, so it takes a while. Run it last.""")
 import pandas as pd
 import plotly.io as pio
 from IPython.display import Image, Markdown, display
-OUT = '{OUT}'
+OUT = os.path.join(os.environ["COSMIC_PROJECT_ROOT"], "outputs", "review2")   # from PROJECT_ROOT (cell at the top)
 pd.set_option('display.width', 220); pd.set_option('display.max_columns', 30); pd.set_option('display.max_rows', 120)
 def csv(name, title=None):
     display(Markdown(f'**{{title or name}}**'))
@@ -204,7 +211,7 @@ display(Markdown(open(p, encoding='utf-8').read())) if os.path.exists(p) else pr
     ("md", "## Supporting: K-Means"),
     ("code", """csv('kmeans_silhouette.csv', 'K-Means silhouette'); fig('fig_kmeans_silhouette')
 csv('kmeans_crosstab_label.csv', 'Cluster vs label')"""),
-    ("code", f'!ls -la "{OUT}"'),
+    ("code", '!ls -la "$OUT"'),
 ]
 
 

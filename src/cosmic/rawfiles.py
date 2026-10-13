@@ -1,16 +1,18 @@
 """Finding and checking the raw AAVSO CSV files (plain Python, no Spark needed).
 
 What it does:
-  1. Walks the data folder recursively (EXISTING/, NEW_2024/, NEW_2025/ ...) and returns every
-     *.csv file. ZIPs and any other non-CSV files are ignored, and so is every folder named in
-     `ingest.exclude_dirs` (DOWNLOAD_LOG by default), at any depth.
-  2. Reads only the first line of each CSV and compares it with the expected AAVSO export
+  1. Lists the *.csv files DIRECTLY inside the data folder (PROJECT_ROOT/data). Nothing else
+     is read: not sub-folders, not the outputs or work folders, not ZIPs or other files.
+     If CSVs are found in sub-folders of data/, it stops with an error that lists them (they
+     must be moved into data/ itself), so no data is ever skipped silently.
+  2. Stops with a clear error if two files would get the same name in HDFS (names that differ
+     only in upper/lower case), because one would overwrite the other.
+  3. Reads only the first line of each CSV and compares it with the expected AAVSO export
      header. A file whose header differs is skipped and reported with the header it actually
      has. No column mapping is ever guessed.
 
-Why: data arrives in download rounds, in several sub-folders. Ingestion (Step 1) and the
-dataset audit must see exactly the same set of files, and a file in the wrong format must be
-visible in the audit, not silently mis-read.
+Why: ingestion (Step 1) and the dataset audit must see exactly the same set of files, and a
+file in the wrong place or the wrong format must be visible, not silently mis-read.
 """
 import csv
 import io
@@ -21,19 +23,35 @@ RAW_COLUMNS = ["#", "target", "auid", "jd", "mag", "uncertainty", "fainterthan",
                "chart", "commentcode", "comments"]
 
 
-def find_csv_files(root, exclude_dirs=("DOWNLOAD_LOG",), exclude_paths=()):
-    """Sorted paths of every *.csv under `root`, skipping excluded folder names (case-insensitive)
-    and the excluded folders themselves (e.g. the pipeline's own output, labels and work folders)."""
-    if not os.path.isdir(root):
-        raise FileNotFoundError(f"Data folder not found: {root}")
-    excluded = {d.upper() for d in exclude_dirs or []}
-    skip = {os.path.normcase(os.path.abspath(p)) for p in exclude_paths}
-    out = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d.upper() not in excluded
-                             and os.path.normcase(os.path.abspath(os.path.join(dirpath, d))) not in skip)
-        out += [os.path.join(dirpath, f) for f in sorted(filenames) if f.lower().endswith(".csv")]
-    return out
+def list_csv_files(data_dir):
+    """Sorted paths of the *.csv files directly in data_dir. Raises if data_dir is missing, if CSVs
+    sit in sub-folders, or if two file names collide (case-insensitively)."""
+    if not os.path.isdir(data_dir):
+        raise FileNotFoundError(f"Data folder not found: {data_dir}")
+    names = sorted(os.listdir(data_dir))
+    files = [os.path.join(data_dir, n) for n in names
+             if n.lower().endswith(".csv") and os.path.isfile(os.path.join(data_dir, n))]
+    nested = [os.path.relpath(os.path.join(dp, f), data_dir).replace(os.sep, "/")
+              for d in names if os.path.isdir(os.path.join(data_dir, d))
+              for dp, _, fs in os.walk(os.path.join(data_dir, d)) for f in fs if f.lower().endswith(".csv")]
+    if nested:
+        raise ValueError(f"{len(nested)} CSV file(s) are in sub-folders of {data_dir}, which are not read. "
+                         "Move them directly into data/ (and remove the sub-folders):\n  "
+                         + "\n  ".join(nested[:50]) + ("\n  ..." if len(nested) > 50 else ""))
+    dups = duplicate_names([os.path.basename(f) for f in files])
+    if dups:
+        raise ValueError("Duplicate file names in the data folder (they would overwrite each other in HDFS): "
+                         + "; ".join(" / ".join(v) for v in dups) + ". Rename or remove the duplicates.")
+    return files
+
+
+def duplicate_names(names):
+    """Groups of file names that are equal apart from upper/lower case (and so collide in HDFS
+    or on a case-insensitive file system)."""
+    seen = {}
+    for n in names:
+        seen.setdefault(n.lower(), []).append(n)
+    return [v for v in seen.values() if len(v) > 1]
 
 
 def read_header(path):
@@ -63,11 +81,9 @@ def check_headers(files, root):
 
 
 def discover(cfg):
-    """(root, accepted_files, skipped) for the configured dataset."""
-    root = cfg.raw_dir
-    own = [os.path.dirname(cfg.labels_file), cfg.work_dir, cfg.output_dir,
-           os.path.join(cfg.root, cfg.ds["output_subdir"].replace("\\", "/").split("/")[0])]
-    files = find_csv_files(root, cfg.section("ingest").get("exclude_dirs", ["DOWNLOAD_LOG"]), exclude_paths=own)
+    """(data_dir, accepted_files, skipped) for the configured dataset."""
+    root = cfg.data_dir
+    files = list_csv_files(root)
     accepted, skipped = check_headers(files, root)
-    print(f"{len(files)} CSV files under {root}: {len(accepted)} accepted, {len(skipped)} skipped")
+    print(f"{len(files)} CSV files in {root}: {len(accepted)} accepted, {len(skipped)} skipped")
     return root, accepted, skipped

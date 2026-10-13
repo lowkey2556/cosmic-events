@@ -27,7 +27,7 @@ Compatibility:
 # 0. In the notebook: mount Drive, then clone the repository
 git clone https://github.com/<you>/<repo>.git /content/cosmic && cd /content/cosmic
 
-# 1. Install (about 6-8 min the first time; tarballs are then cached in MyDrive/cosmic/cache)
+# 1. Install (about 6-8 min the first time; tarballs are then cached in $COSMIC_PROJECT_ROOT/work/cache)
 bash setup/install_stack.sh
 #   apt-get install -y openjdk-8-jdk-headless
 #   wget + sha512 check: hadoop-3.3.6, spark-3.5.9-bin-hadoop3, apache-hive-3.1.3-bin, db-derby-10.14.2.0-bin
@@ -84,7 +84,7 @@ On 2026-10-11, on the WSL test machine (non-root, 3.7 GB RAM, YARN 2 GB), these 
   table readable from the Hive CLI.
 
 On 2026-10-13, on a Windows 11 laptop (local-mode Spark 3.5.9 from pip, Java 8, Python 3.12, PyTorch CPU;
-no HDFS, YARN or Hive), `pytest` passed 36 of 36 tests, including the Spark windowing, the Spark MLlib
+no HDFS, YARN or Hive), `pytest` passed 41 of 41 tests (after the single-PROJECT_ROOT layout change), including the path checks, the Spark windowing, the Spark MLlib
 models on windows, the star-attrition table, RGA-Net training with its ablations, Spark distributed
 inference of the saved RGA-Net (matching PyTorch to 1e-5), and the comparison step.
 The full pipeline on YARN with the new steps (windowing, ML models, RGA-Net, comparison, scalability) had

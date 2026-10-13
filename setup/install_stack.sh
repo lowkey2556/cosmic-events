@@ -9,7 +9,7 @@
 #
 # Environment overrides (all optional):
 #   STACK_HOME  install prefix         (default /opt/cosmic_stack as root, else ~/cosmic_stack)
-#   CACHE_DIR   tarball cache          (default /content/drive/MyDrive/cosmic/cache if Drive is mounted)
+#   CACHE_DIR   tarball cache          (default $COSMIC_PROJECT_ROOT/work/cache, else ~/cosmic_cache)
 #   PYTHON      python for PySpark     (default python3)
 #   JAVA_HOME   use an existing Java 8 instead of apt (only for non-root test machines)
 set -euo pipefail
@@ -23,8 +23,13 @@ APACHE=https://archive.apache.org/dist
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ "$(id -u)" = "0" ]; then DEFAULT_HOME=/opt/cosmic_stack; else DEFAULT_HOME="$HOME/cosmic_stack"; fi
 STACK_HOME="${STACK_HOME:-$DEFAULT_HOME}"
-if [ -d /content/drive/MyDrive ]; then DEFAULT_CACHE=/content/drive/MyDrive/cosmic/cache; else DEFAULT_CACHE="$HOME/cosmic_cache"; fi
+if [ -n "${COSMIC_PROJECT_ROOT:-}" ]; then DEFAULT_CACHE="$COSMIC_PROJECT_ROOT/work/cache"; else DEFAULT_CACHE="$HOME/cosmic_cache"; fi
 CACHE_DIR="${CACHE_DIR:-$DEFAULT_CACHE}"
+# The retired Drive folders are never read or written (tarballs are re-downloaded into work/cache instead).
+case "$CACHE_DIR" in
+  /content/drive/MyDrive/cosmic|/content/drive/MyDrive/cosmic/*|*cosmic_OLD_do_not_use*)
+    echo "ERROR: CACHE_DIR=$CACHE_DIR is inside the retired folder; set COSMIC_PROJECT_ROOT=/content/drive/MyDrive/cosmic_roja"; exit 1 ;;
+esac
 PYTHON="${PYTHON:-python3}"
 mkdir -p "$STACK_HOME" "$CACHE_DIR"
 echo "== STACK_HOME=$STACK_HOME  CACHE_DIR=$CACHE_DIR  PYTHON=$PYTHON"

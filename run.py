@@ -3,6 +3,7 @@
     python run.py <step>[+<step>...] [--data real|synthetic] [--set key.sub=value ...]
 
 Steps, in pipeline order:
+    paths                   print the resolved paths (all derived from PROJECT_ROOT) and check them
     audit          Step 0   dataset audit of the raw CSVs: sizes, rows, stars, 50 MB check (no Spark)
     architecture            architecture diagram with Graphviz: PNG + SVG + DOT (no Spark)
     ingest         Step 1   HDFS put, VSX labels, Parquet + Hive external table, partition pruning, dataset summary
@@ -21,7 +22,8 @@ Steps, in pipeline order:
     all                     audit .. compare in order (not scalability)
 
 Steps can be chained with "+": `python run.py preprocess+windows` runs both in one Spark session.
-`--data real` (default) uses Drive data and writes to Drive/cosmic_roja/outputs/review2/.
+`--data real` (default) reads PROJECT_ROOT/data/*.csv and writes to PROJECT_ROOT/outputs/review2/ and
+PROJECT_ROOT/work/ (PROJECT_ROOT = /content/drive/MyDrive/cosmic_roja, or $COSMIC_PROJECT_ROOT).
 `--data synthetic` uses data/synthetic/ and writes to synthetic_run/ (never review2/).
 """
 import argparse
@@ -34,10 +36,10 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 sys.stdout.reconfigure(line_buffering=True)  # show progress live in Colab "!python" cells
 
-from cosmic.config import load_config  # noqa: E402
+from cosmic.config import check_paths, load_config  # noqa: E402
 
 SPARK_STEPS = ["ingest", "preprocess", "score", "features", "windows", "cluster", "classify", "infer"]
-LOCAL_STEPS = ["audit", "architecture", "rganet", "compare", "scalability"]
+LOCAL_STEPS = ["paths", "audit", "architecture", "rganet", "compare", "scalability"]
 ALL = ["audit", "architecture", "ingest", "preprocess", "score", "features", "windows", "cluster", "classify",
        "rganet", "infer", "compare"]
 
@@ -50,6 +52,8 @@ def architecture(cfg):
 
 
 def run_local(step, cfg, overrides):
+    if step == "paths":
+        return
     if step == "audit":
         from cosmic import audit
         print(f"data folder: {cfg.raw_dir}")
@@ -106,9 +110,10 @@ def main(argv=None):
     if unknown:
         ap.error(f"unknown step(s) {unknown}; choose from {SPARK_STEPS + LOCAL_STEPS}")
     cfg = load_config(a.data, a.set)
+    print(f"dataset={a.data}  hive database={cfg.db}  hdfs={cfg.hdfs_base}")
+    check_paths(cfg, need_data=bool({"paths", "audit", "ingest"} & set(steps)))  # stops on a retired or missing path
     from cosmic import plots
     plots.set_export(**cfg.section("plots"))
-    print(f"dataset={a.data}  hive database={cfg.db}  hdfs={cfg.hdfs_base}  outputs={cfg.output_dir}")
 
     # consecutive Spark steps share one Spark session; other steps run on their own
     group = []

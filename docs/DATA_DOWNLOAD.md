@@ -14,8 +14,8 @@ form.
 - **Stars:** the 44 stars below (also in `config/stars.yaml`). 22 are eruptive or cataclysmic and
   22 are regular periodic, all heavily observed, so observers overlap.
 - **Date ranges:** the data arrives in rounds: January 2025 (the existing files), then
-  February–December 2025, then 2024, then 2026, then 2023. Each round goes in its own
-  sub-folder (see below). If a file is enormous (T CrB and SS Cyg can be),
+  February–December 2025, then 2024, then 2026, then 2023. Every round's files go directly
+  into the same `data/` folder (see below). If a file is enormous (T CrB and SS Cyg can be),
   that's fine: Step 2 thins dense CCD time series.
 
 | # | Eruptive / cataclysmic | | # | Regular periodic |
@@ -71,29 +71,30 @@ The dataset audit and Step 1 check the header of **every** file. A file whose he
 
 ## Where to put the files in Google Drive
 
-The CSVs live under one **data root** folder, in one sub-folder per download round. The
-pipeline searches it recursively. Only `*.csv` files are read: ZIPs and other files are
-ignored, and so is any folder named `DOWNLOAD_LOG`.
+Every path is derived from one setting, **PROJECT_ROOT** = `/content/drive/MyDrive/cosmic_roja`
+(`datasets.real.project_root` in `config/settings.yaml`; the notebook sets it). Only the `*.csv`
+files **directly inside `data/`** are read; ZIPs and other files there are ignored. CSVs in
+sub-folders of `data/`, or two files whose names differ only in upper/lower case, stop the run with
+a clear error (they would be skipped, or overwrite each other in HDFS).
 
 ```
 MyDrive/
-├── cosmic_roja/            <- the project folder: DATA_ROOT in the notebook (= root and data_root in settings.yaml)
-│   ├── raw/                 <- 2024 files (AAVSO default names, observations_*.csv)
-│   ├── existing/            <- the original January 2025 files
-│   ├── <any new folder>/    <- later rounds; any depth and any file names work
-│   ├── DOWNLOAD_LOG/        <- ignored, if present
-│   ├── labels/              <- created automatically: vsx_labels.csv (never read as data)
-│   ├── work/                <- created automatically: window tensors, splits, predictions (never read as data)
-│   └── outputs/review2/     <- created automatically: all Review 2 outputs (never read as data)
-└── cosmic/
-    └── cache/               <- created automatically (Hadoop/Spark/Hive tarballs)
+└── cosmic_roja/                 <- PROJECT_ROOT: every path below is derived from it
+    ├── data/                    <- ALL the AAVSO CSVs, directly in this folder (no sub-folders)
+    ├── outputs/review2/         <- created automatically: every table and figure for Review 2
+    └── work/                    <- created automatically: models, window tensors, splits, predictions,
+        ├── labels/              <-   vsx_labels.csv (star types from VizieR, fetched when missing)
+        └── cache/               <-   Hadoop/Spark/Hive downloads (saves time after a reset)
 ```
+
+The old `MyDrive/cosmic` folder (renamed `cosmic_OLD_do_not_use`) is never read or written:
+the notebook stops if any path points there.
 
 ## Labels (VSX)
 
 Step 1 queries VizieR `B/vsx/vsx` with astroquery, **only for the stars found in your files**,
-one request per second. It saves `labels/vsx_labels.csv` with columns `auid,name,ra,dec,type`.
+one request per second. It saves `work/labels/vsx_labels.csv` (under PROJECT_ROOT) with columns `auid,name,ra,dec,type`.
 If that fails (for example, VizieR is down), export the rows by hand from
 <https://vizier.cds.unistra.fr/viz-bin/VizieR-3?-source=B/vsx/vsx>: search each name and keep the
-columns Name, RAJ2000, DEJ2000 and Type. Save them as `labels/vsx_labels.csv` with the header
+columns Name, RAJ2000, DEJ2000 and Type. Save them as `work/labels/vsx_labels.csv` with the header
 `name,ra,dec,type` (RA/Dec in decimal degrees). The pipeline will then match on name.

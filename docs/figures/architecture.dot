@@ -4,7 +4,7 @@ digraph cosmic {
   node  [shape=box, style="rounded,filled", color="#52514e", penwidth=1.2, fontname="Helvetica",
          fontsize=11, fontcolor="#0b0b0b", margin="0.18,0.10", width=3.1];
   edge  [color="#2a78d6", penwidth=1.8, arrowsize=0.8];
-  drive [fillcolor="#f3f2ee", label=<<b><font point-size="13">Google Drive</font></b><br/><font color="#52514e">AAVSO CSV exports (cosmic_roja/raw, existing)<br/>+ VSX types (VizieR)</font>>];
+  drive [fillcolor="#f3f2ee", label=<<b><font point-size="13">Google Drive</font></b><br/><font color="#52514e">AAVSO CSV exports (cosmic_roja/data)<br/>+ VSX types (VizieR)</font>>];
   audit [fillcolor="#f3f2ee", label=<<b><font point-size="13">Python — Step 0</font></b><br/><font color="#52514e">dataset audit: MB, rows, stars,<br/>50 MB check, header check</font>>];
   hdfs [fillcolor="#fdf0e9", label=<<b><font point-size="13">Hadoop HDFS</font></b><br/><font color="#52514e">/cosmic/raw/&lt;sub-folder&gt;/*.csv</font>>];
   ingest [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark on YARN — Step 1</font></b><br/><font color="#52514e">explicit-schema read → Parquet + Snappy<br/>partitioned by obs_year / sky_region</font>>];

@@ -13,19 +13,23 @@ a standard Colab GPU machine; your runs may be faster or slower.
 
 ```
 MyDrive/
-├── cosmic_roja/                 <- your project folder (DATA_ROOT)
-│   ├── raw/                     <- the 2024 CSVs (observations_20261012_*.csv)
-│   ├── existing/                <- the January 2025 CSVs
-│   ├── labels/                  <- created automatically: vsx_labels.csv (star types from VizieR)
-│   ├── work/                    <- created automatically: window tensors and predictions
-│   └── outputs/review2/         <- created automatically: every table and figure for Review 2
-└── cosmic/cache/                <- created automatically: Hadoop/Spark/Hive downloads (saves time after a reset)
+└── cosmic_roja/                 <- PROJECT_ROOT: every path below is derived from it
+    ├── data/                    <- ALL the AAVSO CSVs, directly in this folder (no sub-folders)
+    ├── outputs/review2/         <- created automatically: every table and figure for Review 2
+    └── work/                    <- created automatically: models, window tensors, splits, predictions,
+        ├── labels/              <-   vsx_labels.csv (star types from VizieR, fetched when missing)
+        └── cache/               <-   Hadoop/Spark/Hive downloads (saves time after a reset)
 ```
 
-- File names don't matter. Stars are identified by their `auid`.
-- Only `.csv` files in `cosmic_roja/` and its sub-folders are read. ZIPs, other files, any
-  `DOWNLOAD_LOG` folder, and the pipeline's own `labels/`, `work/` and `outputs/` folders are ignored.
-- You can add new sub-folders inside `cosmic_roja/` later; they are found automatically.
+The old `MyDrive/cosmic` folder (renamed `cosmic_OLD_do_not_use`) is never read or written:
+the notebook stops if any path points there.
+
+- File names don't matter (but no two may share a name). Stars are identified by their `auid`.
+- Only `.csv` files **directly in `data/`** are read. If any CSV is still in a sub-folder of
+  `data/` (e.g. the old `raw/` or `existing/`), the notebook stops and lists it: move it into
+  `data/` itself. Outputs and work files are never read as data.
+- On the first run with this layout, the VSX labels are fetched again into `work/labels/` (1 s per star) and the
+  stack tarballs are downloaded again into `work/cache/` (about 1.5 GB, once).
 
 ### 1.2 Open the notebook
 
@@ -57,7 +61,7 @@ The first time, run the cells **one by one from the top** and check each result.
 | # | Notebook section | Time (estimate) | What you should see when it works |
 |---|---|---|---|
 | 1 | **0. Mount Google Drive and get the code** | < 1 min | `Mounted at /content/drive`, then the latest commits |
-| 2 | **Data folder** | seconds | The folders of `cosmic_roja` (`existing`, `raw`, …). `AssertionError: Drive folder not found` → see §5 |
+| 2 | **Project folder and path check** | seconds | `Resolved paths:` (PROJECT_ROOT, data, outputs, work, labels file, tarball cache — all under `cosmic_roja`), then `N CSV files directly in …/data`. An error here stops the run → see §5 |
 | 3 | **GPU check** | seconds | `GPU: Tesla T4` (or similar). `NONE` → see §5 |
 | 4 | **Step 0: Dataset audit** | 1–3 min | Files, Per star, Class balance, Skipped files, Unmatched VSX types, then **SUMMARY** with PASS/FAIL |
 | 5 | **1. Install the stack** | 6–8 min first time; 2–4 min after (cache) | Ends without `ERROR`; `%%time` shows the time |
@@ -185,18 +189,18 @@ YARN executors, the speedup, how many executors YARN actually granted, and the C
 **What is lost:** everything on the Colab machine: the installed stack, HDFS contents, Hive tables,
 and the cloned code.
 
-**What survives (in Drive):** your data, `cosmic_roja/labels/`, `cosmic_roja/work/` (window
-tensors `windows_seq.npz`, `splits.csv`, all predictions), `cosmic_roja/outputs/review2/` (every
-table and figure), and the download cache `cosmic/cache/`.
+**What survives (in Drive):** everything under `cosmic_roja/`: your data (`data/`), `work/` (window
+tensors `windows_seq.npz`, `splits.csv`, models, predictions, `labels/vsx_labels.csv`, the download
+cache `cache/`) and `outputs/review2/` (every table and figure).
 
 **Quickest way back:**
 
 | What you want | What to run |
 |---|---|
 | Just **look at** the results | Mount Drive, then the **Review 2 results** cells. No stack needed. |
-| Re-run **RGA-Net** or the **comparison** | Mount Drive, clone, Data folder, then `!python run.py rganet --data real` and/or `!python run.py compare --data real`. No stack needed: they read `work/`. (Step 8b, distributed inference, needs the stack and the Hive tables from Steps 1–5.) |
+| Re-run **RGA-Net** or the **comparison** | Mount Drive, clone, the path-check cell, then `!python run.py rganet --data real` and/or `!python run.py compare --data real`. No stack needed: they read `work/`. (Step 8b, distributed inference, needs the stack and the Hive tables from Steps 1–5.) |
 | Re-run the **ML models** or anything in Spark | The Hive tables are gone, so run: install → start → environment → Steps 1, 2, 3, 5 → then Step 7. (Step 4 and 6 only if you need K-Means.) |
-| **Kernel restarted** only (machine still alive) | Mount, clone, Data folder, `!bash setup/start_stack.sh`, the environment cell; HDFS and Hive are still there, so continue where you stopped. |
+| **Kernel restarted** only (machine still alive) | Mount, clone, the path-check cell, `!bash setup/start_stack.sh`, the environment cell; HDFS and Hive are still there, so continue where you stopped. |
 
 The audit (Step 0) needs no stack at all. You can re-run it any time after mounting Drive.
 
@@ -206,7 +210,10 @@ The audit (Step 0) needs no stack at all. You can re-run it any time after mount
 
 | Problem | What to do |
 |---|---|
-| `AssertionError: Drive folder not found: /content/drive/MyDrive/cosmic_roja` | Drive isn't mounted, or the folder name differs. Re-run the mount cell; in the Files panel (left) open `drive/MyDrive` and check the exact name (capital letters matter); fix `DATA_ROOT` if needed. |
+| `FileNotFoundError: The data folder does not exist: …/cosmic_roja/data` | Drive isn't mounted, or the folder name differs. Re-run the mount cell; in the Files panel (left) open `drive/MyDrive/cosmic_roja` and check that `data` exists (capital letters matter). Fix `PROJECT_ROOT` in the path-check cell if needed. |
+| `ValueError: … CSV file(s) are in sub-folders of …/data` | Move the listed files directly into `data/` and delete the empty sub-folders (e.g. `raw/`, `existing/`). |
+| `ValueError: Duplicate file names in the data folder` | Two files differ only in upper/lower case; rename or delete one. |
+| `ValueError: These paths point at the retired folder` | `PROJECT_ROOT` was set to the old folder. Set it to `/content/drive/MyDrive/cosmic_roja`. |
 | GPU check says `NONE` | **Runtime → Change runtime type → T4 GPU**, then reconnect and run from the top. If Colab says no GPU is available (usage limits), you can still run everything; RGA-Net will train on the CPU and take much longer. |
 | HDFS or YARN not starting; a smoke test says `FAIL` | Run `!bash setup/start_stack.sh` again (it only starts what's missing), then `!jps`: you should see NameNode, DataNode, ResourceManager, NodeManager and RunJar (the metastore). If it still fails: **Runtime → Disconnect and delete runtime**, then run from the top. |
 | Hive metastore errors (`Could not connect to meta store`, `thrift://localhost:9083`) | Run `!bash setup/start_stack.sh`, then smoke test 4. |
@@ -217,16 +224,16 @@ The audit (Step 0) needs no stack at all. You can re-run it any time after mount
 | `ModuleNotFoundError` (e.g. `yaml`, `plotly`) | Re-run the install cell (it installs `requirements.txt`). For the audit alone, its own cell installs what it needs. |
 | `PNG export failed` warnings | The HTML files are still saved. Tell me what `figure_export_log.csv` says. |
 | `RuntimeError: Graphviz dot not found` | `!apt-get -qq install -y graphviz`, then the architecture cell again. |
-| VizieR look-ups fail (network) | Re-run Step 1 later. Stars already looked up are kept in `cosmic_roja/labels/vsx_labels.csv`. |
+| VizieR look-ups fail (network) | Re-run Step 1 later. Stars already looked up are kept in `cosmic_roja/work/labels/vsx_labels.csv`. |
 | Scalability: "YARN granted fewer executors than requested" | The machine ran out of memory for more executors; the table shows what was granted. Report it as measured. |
 
 ---
 
 ## 6. Adding new data
 
-1. Put the new CSVs in a **new sub-folder** of `cosmic_roja/` (or into `raw/`). Don't delete or
-   rename old files.
-2. Re-run, in order: **Data folder**, **Step 0 audit**, then (with the stack running) **Steps 1 → 9**,
+1. Put the new CSVs **directly into `cosmic_roja/data/`** (no sub-folders; each file name must be
+   new). Don't delete or rename old files.
+2. Re-run, in order: **Project folder and path check**, **Step 0 audit**, then (with the stack running) **Steps 1 → 9**,
    and Step 10 if you want new scalability numbers. Step 1 clears `/cosmic/raw` in HDFS and
    re-uploads everything, so removed files never linger. New stars are looked up in VSX automatically.
 3. Check the audit's **Skipped files**, **Unmatched VSX types** and **repeated rows**, and the
@@ -262,8 +269,7 @@ The audit (Step 0) needs no stack at all. You can re-run it any time after mount
 If the faculty asks to see the stack working, run these after the stack is started (each takes
 seconds):
 
-1. **HDFS:** `!hdfs dfs -ls -R -h "/cosmic/raw" | head -20` — the raw CSVs stored in HDFS,
-   in the same sub-folders as in Drive.
+1. **HDFS:** `!hdfs dfs -ls -h "/cosmic/raw" | head -20` — the raw CSVs stored in HDFS.
 2. **Hive:** `!hive -S -e "USE cosmic; SHOW TABLES;"` and
    `!hive -S -e "SELECT label, COUNT(*) FROM cosmic.window_features GROUP BY label;"` — the
    pipeline's tables, and the windows per class, read by Hive itself.

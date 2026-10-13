@@ -1,10 +1,9 @@
 """Step 1 — Ingestion & storage.
 
 What it does:
-  1. Finds every *.csv under the configured data folder (recursively; ZIPs, other files and
-     DOWNLOAD_LOG/ ignored), skips and lists any file whose header is not the AAVSO export
-     header, and `hdfs dfs -put`s the accepted files into HDFS /<base>/raw/, keeping their
-     sub-folders (so two rounds may contain files with the same name).
+  1. Lists the *.csv files directly in PROJECT_ROOT/data (stopping on CSVs in sub-folders or
+     duplicate names), skips and lists any file whose header is not the AAVSO export header,
+     and `hdfs dfs -put`s the accepted files into HDFS /<base>/raw/.
   2. Builds the star labels table (VSX types, coordinates, sky_region) — see labels.py.
   3. Reads the CSVs in Spark with an explicit schema (every column named; text read
      first and then cast, so blanks and "NA" become nulls instead of crashing).
@@ -77,7 +76,7 @@ def hadoop_literal(path):
 
 
 def put_raw_files(cfg):
-    """Copy the accepted CSVs into HDFS <base>/raw/<same sub-folders>; return their HDFS URIs."""
+    """Copy the accepted CSVs into HDFS <base>/raw/; return their HDFS URIs."""
     root, files, skipped = discover(cfg)
     save_csv(pd.DataFrame(skipped, columns=["file", "reason", "header_found"]), cfg, "skipped_files.csv")
     if not files:
