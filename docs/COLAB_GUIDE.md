@@ -74,6 +74,7 @@ The first time, run the cells **one by one from the top** and check each result.
 | 16 | **10. Step 6: K-Means** | 1–3 min | Silhouette per k |
 | 17 | **11. Step 7: ML models** | 10–30 min | One line per seed / feature set / model with its chosen setting and validation PR-AUC |
 | 18 | **12. Step 8: RGA-Net** | 10–40 min on a T4 GPU (hours on CPU) | `RGA-Net on GPU: …`, then one line per variant and seed (best epoch, validation PR-AUC, λ), then the learned λ table |
+| 18b | **12b. Step 8b: Distributed inference** | 2–10 min | `Broadcasting 5 trained models…`, `Scored N (window, model) pairs…`, then the Hive query output and the Spark-vs-PyTorch check (max difference near 0, e.g. below 0.0001) |
 | 19 | **13. Step 9: Comparison** | < 1 min | The comparison, star-level and ablation tables; `saved …/COMPARISON.md` |
 | 20 | **14. Step 10: Scalability** | 30–90 min (9 runs) | One line per run (`… s (Spark steps), executors granted by YARN: n`), then the summary table |
 | 21 | **Review 2 results** | < 1 min | Every table and interactive figure, and COMPARISON.md |
@@ -152,6 +153,13 @@ box is the tool family (legend bottom right); orange dashed arrows = tables regi
 | `rganet_learned_lambda.csv` | The learned gate strengths λ per seed | λ near 0 = the network chose not to use the gate; larger λ = more attention to reliable observers. |
 | `ablation_table.csv`, `fig_ablation` | Full vs no-gate vs observer-blind | If "full" beats "no gate", the gate itself helps; if "no gate" beats "observer-blind", observer information helps at all. Check the ± spread before concluding. |
 
+### Distributed inference (Big Data slide)
+
+| File | What it shows | How to read it |
+|---|---|---|
+| Hive table `window_predictions`, `window_predictions_summary.csv` | The trained RGA-Net applied by Spark to every window (one row per window and split seed) | Shows the trained deep model running inside the Big Data stack, in parallel, with results in Hive. |
+| `distributed_inference_check.csv` | Largest difference between Spark's and PyTorch's probabilities on the validation/test windows | Should be near 0 (floating-point noise): Spark reproduces the trained model exactly. |
+
 ### Comparison slide (main result)
 
 | File | What it shows | How to read it |
@@ -186,7 +194,7 @@ table and figure), and the download cache `cosmic/cache/`.
 | What you want | What to run |
 |---|---|
 | Just **look at** the results | Mount Drive, then the **Review 2 results** cells. No stack needed. |
-| Re-run **RGA-Net** or the **comparison** | Mount Drive, clone, Data folder, then `!python run.py rganet --data real` and/or `!python run.py compare --data real`. No stack needed: they read `work/`. |
+| Re-run **RGA-Net** or the **comparison** | Mount Drive, clone, Data folder, then `!python run.py rganet --data real` and/or `!python run.py compare --data real`. No stack needed: they read `work/`. (Step 8b, distributed inference, needs the stack and the Hive tables from Steps 1–5.) |
 | Re-run the **ML models** or anything in Spark | The Hive tables are gone, so run: install → start → environment → Steps 1, 2, 3, 5 → then Step 7. (Step 4 and 6 only if you need K-Means.) |
 | **Kernel restarted** only (machine still alive) | Mount, clone, Data folder, `!bash setup/start_stack.sh`, the environment cell; HDFS and Hive are still there, so continue where you stopped. |
 
@@ -242,6 +250,7 @@ The audit (Step 0) needs no stack at all. You can re-run it any time after mount
    - [ ] `star_attrition.csv` reviewed: you can explain every star that is not used
    - [ ] Steps 1–10 ran without errors on the final data
    - [ ] `comparison_table.csv`, `ablation_table.csv`, `rganet_learned_lambda.csv`, `COMPARISON.md` present
+   - [ ] `distributed_inference_check.csv`: Spark vs PyTorch difference near 0
    - [ ] `figure_export_log.csv` shows `png = True` for every figure
    - [ ] Slides quote `COMPARISON.md` honestly (including where RGA-Net is not best)
    - [ ] Notebook saved with outputs and shared view-only
@@ -261,6 +270,8 @@ seconds):
 3. **YARN:** `!yarn application -list -appStates ALL | tail -10` — every Spark job that ran on YARN
    (or open the YARN web UI on port 8088 with the optional cell).
 4. **Spark on YARN, live:** `!bash setup/smoke_tests.sh 3` — submits SparkPi to YARN and prints PASS.
+5. **The deep model inside Spark:** `!hive -S -e "SELECT window_id, seed, ROUND(prob, 3) FROM cosmic.window_predictions LIMIT 10;"`
+   — RGA-Net's predictions, computed in parallel by Spark executors, read back by Hive.
 
 To show RGA-Net itself, open `src/cosmic/rganet.py` at `GatedSelfAttention.forward`: the line
 `s = s + self.lam() * log_a[...]` is the reliability gate, `score(i, j) = q·k/√d + λ·log(A_j + ε)`.

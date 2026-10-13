@@ -21,7 +21,9 @@ What it does:
     no_gate         λ fixed at 0 everywhere; A_k is still one of the token features
     observer_blind  no gate, and A_k and the observer offset are removed from the tokens
 Outputs (work/ and outputs/review2/): predictions_rganet.csv, rganet_history.csv (loss and
-validation curves per epoch), rganet_runs.csv (best epoch, training time, parameters, learned λ).
+validation curves per epoch), rganet_runs.csv (best epoch, training time, parameters, learned λ),
+and every trained model in work/models/rganet_<variant>_seed<seed>.pt (weights + the training
+statistics needed to feed it), which Step 8b (infer.py) applies to all windows with Spark.
 
 Why: crowdsourced observations differ in quality. The gate lets the model learn how much
 more attention reliable observers' measurements should get, directly inside attention.
@@ -157,18 +159,64 @@ def load_windows(work_dir):
     return data
 
 
-def tensors(data, idx, variant, mean, std):
-    """Model inputs for windows idx. Numeric features standardised with TRAIN statistics."""
-    names = list(data["feature_names"])
+def make_inputs(num_raw, band, otype, mask, names, variant, mean, std):
+    """Model inputs from raw token arrays (N x L x features). Used for training AND for Spark inference,
+    so both prepare windows identically. Numeric features are standardised with TRAIN statistics;
+    the observer-blind variant drops A_k and the offset."""
+    names = list(names)
+    mean, std = np.asarray(mean, np.float64), np.asarray(std, np.float64)
     keep = [i for i, n in enumerate(names) if not (variant == "observer_blind" and n in OBSERVER_TOKEN_FEATURES)]
-    num = (data["num"][idx][..., keep] - mean[keep]) / std[keep]
-    mask = data["mask"][idx]
+    num = (num_raw[..., keep] - mean[keep]) / std[keep]
     num = np.where(mask[..., None], num, 0.0).astype(np.float32)
-    t = data["num"][idx][..., names.index("t_days")]
-    a = data["num"][idx][..., names.index("a_k")]
-    return dict(num=torch.from_numpy(num), band=torch.from_numpy(data["band"][idx]),
-                otype=torch.from_numpy(data["otype"][idx]), t=torch.from_numpy(t.astype(np.float32)),
-                a=torch.from_numpy(a.astype(np.float32)), mask=torch.from_numpy(mask))
+    t = num_raw[..., names.index("t_days")]
+    a = num_raw[..., names.index("a_k")]
+    return dict(num=torch.from_numpy(num), band=torch.from_numpy(np.asarray(band, np.int64)),
+                otype=torch.from_numpy(np.asarray(otype, np.int64)), t=torch.from_numpy(t.astype(np.float32)),
+                a=torch.from_numpy(a.astype(np.float32)), mask=torch.from_numpy(np.asarray(mask, bool)))
+
+
+def tensors(data, idx, variant, mean, std):
+    """Model inputs for windows idx of the exported data."""
+    return make_inputs(data["num"][idx], data["band"][idx], data["otype"][idx], data["mask"][idx],
+                       data["feature_names"], variant, mean, std)
+
+
+def save_model(path, model, meta):
+    """Weights + everything needed to rebuild and feed the model (sizes, settings, train statistics)."""
+    torch.save(dict(state={k: v.detach().cpu() for k, v in model.state_dict().items()}, meta=meta), path)
+
+
+def load_model(source):
+    """(model on CPU in eval mode, meta) from a file path or the file's bytes."""
+    import io
+    blob = torch.load(io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source,
+                      map_location="cpu", weights_only=False)
+    m = blob["meta"]
+    model = RGANet(m["n_num"], m["n_band"], m["n_type"], m["p"], gate=(m["variant"] == "full"))
+    model.load_state_dict(blob["state"])
+    model.eval()
+    return model, m
+
+
+def predict_frame(pdf, models):
+    """Spark inference on one batch of windows. pdf: window_sequences rows (array columns + seq_len);
+    models: list of (model, meta). Returns window_id, seed, variant, prob for every model."""
+    if len(pdf) == 0:
+        return pd.DataFrame(columns=["window_id", "seed", "variant", "prob"])
+    names = models[0][1]["feature_names"]
+    num = np.stack([np.stack([np.asarray(v, np.float64) for v in pdf[c]]) for c in names], axis=-1)
+    L = num.shape[1]
+    mask = np.arange(L)[None, :] < pdf["seq_len"].to_numpy()[:, None]
+    band = np.stack([np.asarray(v, np.int64) for v in pdf["band_idx"]])
+    otype = np.stack([np.asarray(v, np.int64) for v in pdf["type_idx"]])
+    out = []
+    with torch.no_grad():
+        for model, m in models:
+            X = make_inputs(num, band, otype, mask, names, m["variant"], m["mean"], m["std"])
+            prob = torch.sigmoid(model(**X)).numpy().astype(float)
+            out.append(pd.DataFrame(dict(window_id=pdf["window_id"].to_numpy(), seed=int(m["seed"]),
+                                         variant=m["variant"], prob=prob)))
+    return pd.concat(out, ignore_index=True)
 
 
 def train_stats(data, idx):
@@ -199,7 +247,7 @@ def predict(model, X, device, bs=256):
     return torch.cat(out).numpy() if out else np.zeros(0)
 
 
-def train_one(data, split, variant, seed, p, device, log=print):
+def train_one(data, split, variant, seed, p, device, log=print, save_path=None):
     """Train one variant on one split. Returns (val/test predictions, history, run info)."""
     set_seed(seed)
     sets = {s: np.flatnonzero(np.isin(data["auid"], split.loc[split["set"] == s, "auid"])) for s in ("train", "val", "test")}
@@ -243,6 +291,10 @@ def train_one(data, split, variant, seed, p, device, log=print):
                 break
     train_s = time.time() - t0
     model.load_state_dict(best_state)
+    if save_path:
+        save_model(save_path, model, dict(n_num=n_num, n_band=data["vocab"]["n_band"], n_type=data["vocab"]["n_type"],
+                                          p=dict(p), variant=variant, seed=int(seed), mean=mean.tolist(),
+                                          std=std.tolist(), feature_names=[str(f) for f in data["feature_names"]]))
     preds = []
     for s in ("val", "test"):
         idx = sets[s]
@@ -271,10 +323,13 @@ def run(cfg, variants=None, seeds=None):
     device, msg = device_info()
     print(f"RGA-Net on {msg}; {len(data['label'])} windows; variants {variants}; seeds {seeds}")
     preds, hists, runs = [], [], []
+    model_dir = os.path.join(cfg.work_dir, "models")
+    os.makedirs(model_dir, exist_ok=True)
     for seed in seeds:
         split = splits[splits["seed"] == seed]
         for v in variants:
-            pr, h, info = train_one(data, split, v, seed, p, device)
+            pr, h, info = train_one(data, split, v, seed, p, device,
+                                    save_path=os.path.join(model_dir, f"rganet_{v}_seed{seed}.pt"))
             preds.append(pr.assign(model="RGA-Net", variant=v, seed=seed))
             hists.append(h.assign(variant=v, seed=seed))
             runs.append(dict(variant=v, seed=seed, device=str(device), **info))

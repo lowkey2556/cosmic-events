@@ -41,8 +41,19 @@ Every observation then carries its observer's `A_k` and `offset_k`.
 
 RGA-Net reads one 100-day window as a **sequence of observations** (up to L = 200; an evenly
 spaced subsample if there are more, padding with a mask if fewer) and outputs the probability
-that the star is anomalous. It is a small Transformer-style encoder with one new element:
+that the star is anomalous.
+
+**What it is built on, and what is ours.** RGA-Net is a **Transformer encoder** (Vaswani et al.,
+2017): multi-head scaled dot-product self-attention, feed-forward layers, residual connections
+and layer normalisation, unchanged in structure. Two parts are adapted from existing work: the
+continuous-time encoding that replaces integer positions (the same idea as time-aware attention
+models such as mTAN and ASTROMER), and attention pooling into one window vector. **Our
+contribution is the reliability-gated attention modification**: an additive term
+`λ · log(A_j + ε)` in every attention score (and in the pooling score), where A_j is the measured
+reliability of the observer who made observation j and λ ≥ 0 is learned. In plain words,
 **observations from more reliable observers get more attention, by an amount the network learns.**
+Remove the gate (λ = 0) and RGA-Net is an ordinary Transformer encoder with time encoding; that
+is exactly the "no gate" ablation.
 
 ### Inputs (one token per observation)
 
@@ -90,6 +101,15 @@ best epoch's weights are kept), fixed seeds. The 70/15/15 split is **by star**, 
 threshold is chosen on the validation windows. The test windows are used once, for the final
 numbers. The hyperparameters are fixed in `config/settings.yaml`; none was tuned on test.
 
+### Inference at scale (Spark)
+
+Training runs once, on the GPU. Applying the trained model is then done **by Spark** (Step 8b):
+the saved models (one per split seed) are broadcast to the executors, and `mapInPandas` (a pandas
+UDF over batches of windows) scores every window of every star in parallel, with exactly the
+same input preparation as in training. The results go to the Hive table `window_predictions`,
+and the Spark probabilities on the validation/test windows are checked against PyTorch's own
+(`distributed_inference_check.csv`).
+
 ### Ablations (identical conditions)
 
 | Variant | Gate | A_k and offset as token features |
@@ -135,8 +155,10 @@ believe about the label. RGA-Net deals with *measurement* reliability: the label
 VSX catalogue, but every input measurement was made by a different person, and the model learns
 how much each person's measurements should count while it reads the light curve.
 
-**Novelty, stated cautiously.** To our knowledge, among the reviewed literature, no prior work
-gates attention by a learned observer-reliability score. We do not claim that RGA-Net is more
+**Novelty, stated cautiously.** The encoder itself is the standard Transformer encoder of
+Vaswani et al. (2017); the contribution is the reliability-gated attention modification. To our
+knowledge, among the reviewed literature, no prior work gates attention by a learned
+observer-reliability score. We do not claim that RGA-Net is more
 accurate than other models: the comparison with four ML models on identical splits, and the
 ablation, are reported as measured in `outputs/review2/COMPARISON.md`, including where RGA-Net
 is not the best.

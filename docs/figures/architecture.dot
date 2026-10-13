@@ -15,13 +15,14 @@ digraph cosmic {
   seq [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark → Parquet → npz</font></b><br/><font color="#52514e">token sequences (L = 200, masked)<br/>mag_norm, Δt, band, type, A_k, offset</font>>];
   mllib [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark MLlib — Step 7</font></b><br/><font color="#52514e">Naive Bayes · Decision Tree<br/>Random Forest · Logistic Regression</font>>];
   rga [fillcolor="#efeafb", label=<<b><font point-size="13">PyTorch (Colab GPU) — Step 8</font></b><br/><font color="#52514e">RGA-Net: reliability-gated attention<br/>+ ablations (no gate, observer-blind)</font>>];
+  inf [fillcolor="#e8f0fb", label=<<b><font point-size="13">Spark — Step 8b inference</font></b><br/><font color="#52514e">trained RGA-Net broadcast to executors<br/>mapInPandas over ALL windows → Hive</font>>];
   cmp [fillcolor="#f3f2ee", label=<<b><font point-size="13">Comparison — Step 9</font></b><br/><font color="#52514e">same 5 splits for all models; thresholds<br/>from validation; mean ± std on test</font>>];
   fig [fillcolor="#fef6e0", label=<<b><font point-size="13">Plotly</font></b><br/><font color="#52514e">tables and figures<br/>PNG + interactive HTML</font>>];
-  hive [fillcolor="#fdf0e9", label=<<b><font point-size="13">Hive metastore</font></b><br/><font color="#52514e">observations_raw (external), obs_clean, observer_scores,<br/>windows, window_features, splits, ml_predictions</font>>];
+  hive [fillcolor="#fdf0e9", label=<<b><font point-size="13">Hive metastore</font></b><br/><font color="#52514e">observations_raw (external), obs_clean, observer_scores,<br/>windows, window_features, splits, ml_predictions, window_predictions</font>>];
   { rank=same; drive; audit; hdfs; ingest; }
   { rank=same; win; score; prep; hive; }
   { rank=same; feat; seq; }
-  { rank=same; mllib; rga; }
+  { rank=same; mllib; rga; inf; }
   { rank=same; cmp; fig; legend; }
   drive -> audit;
   audit -> hdfs;
@@ -35,12 +36,14 @@ digraph cosmic {
   seq -> rga;
   mllib -> cmp;
   rga -> cmp;
+  rga -> inf;
   cmp -> fig;
   prep -> hive [style=invis];
   ingest -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
   prep -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
   score -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
   win -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
+  inf -> hive [style=dashed, color="#eb6834", arrowsize=0.6, constraint=false];
   legend [shape=plaintext, style="", fontsize=11, label=<<table border="0" cellspacing="4"><tr><td bgcolor="#e8f0fb" width="22"> </td><td align="left">Spark / Spark SQL / MLlib, submitted to YARN</td></tr><tr><td bgcolor="#fdf0e9" width="22"> </td><td align="left">HDFS / Hive storage</td></tr><tr><td bgcolor="#f3f2ee" width="22"> </td><td align="left">Plain Python on the Colab VM</td></tr><tr><td bgcolor="#efeafb" width="22"> </td><td align="left">PyTorch on the GPU</td></tr><tr><td bgcolor="#fef6e0" width="22"> </td><td align="left">Plotly</td></tr><tr><td></td><td align="left"><font color="#eb6834">orange dashed arrow</font>: table registered in Hive</td></tr><tr><td></td><td align="left"><i>Single-node pseudo-distributed cluster on Colab: HDFS, YARN, Hive metastore.</i></td></tr></table>>];
   fig -> legend [style=invis, minlen=2];
 }

@@ -22,7 +22,8 @@ are not used anywhere. Everything runs on a single-node pseudo-distributed clust
 | 5 | Windowing: per-window ML features, RGA-Net token sequences, 5 star-grouped splits | Spark, Hive |
 | 6 | K-Means (supporting analysis) | Spark MLlib |
 | 7 | The 4 ML models | Spark MLlib |
-| 8 | RGA-Net + ablations | PyTorch (GPU) |
+| 8 | RGA-Net + ablations (trained models saved) | PyTorch (GPU) |
+| 8b | Distributed inference: the trained RGA-Net applied to all windows, Hive table `window_predictions` | Spark (`mapInPandas`), Hive |
 | 9 | Comparison: tables, Plotly figures, `COMPARISON.md` | Python, Plotly |
 | 10 | Scalability: YARN with 1, 2, 4 executors | Spark on YARN |
 
@@ -79,7 +80,7 @@ folder (`/cosmic_synth`), a separate Hive database (`cosmic_synth`) and a separa
 config/       settings.yaml, label_map.yaml, stars.yaml
 setup/        install_stack.sh, start_stack.sh, stop_stack.sh, smoke_tests.sh, smoke_spark_hive.py
 src/cosmic/   audit, rawfiles, ingest, labels (VSX), preprocess, observer_score, features, windowing,
-              windows, splits, cluster, classify, rganet, evaluation, compare, scalability,
+              windows, splits, cluster, classify, rganet, infer, evaluation, compare, scalability,
               plots (Plotly), architecture (Graphviz), spark_session, config
 scripts/      make_synthetic.py (test data), build_notebook.py (generates the Colab notebook)
 notebooks/    cosmic_colab.ipynb

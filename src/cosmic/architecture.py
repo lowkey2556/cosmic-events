@@ -30,19 +30,20 @@ NODES = [
     ("seq", "Spark → Parquet → npz", "token sequences (L = 200, masked)<br/>mag_norm, Δt, band, type, A_k, offset", SPARK),
     ("mllib", "Spark MLlib — Step 7", "Naive Bayes · Decision Tree<br/>Random Forest · Logistic Regression", SPARK),
     ("rga", "PyTorch (Colab GPU) — Step 8", "RGA-Net: reliability-gated attention<br/>+ ablations (no gate, observer-blind)", TORCH),
+    ("inf", "Spark — Step 8b inference", "trained RGA-Net broadcast to executors<br/>mapInPandas over ALL windows → Hive", SPARK),
     ("cmp", "Comparison — Step 9", "same 5 splits for all models; thresholds<br/>from validation; mean ± std on test", PY),
     ("fig", "Plotly", "tables and figures<br/>PNG + interactive HTML", VIZ),
-    ("hive", "Hive metastore", "observations_raw (external), obs_clean, observer_scores,<br/>windows, window_features, splits, ml_predictions", STORE),
+    ("hive", "Hive metastore", "observations_raw (external), obs_clean, observer_scores,<br/>windows, window_features, splits, ml_predictions, window_predictions", STORE),
 ]
 # The second row runs right to left (a "snake" that fits a 16:9 slide): those edges are written
 # reversed with dir=back, so Graphviz places them right-to-left but the arrows still follow the data.
 BACK = {("prep", "score"), ("score", "win")}
 EDGES = [("drive", "audit"), ("audit", "hdfs"), ("hdfs", "ingest"), ("ingest", "prep"), ("prep", "score"),
          ("score", "win"), ("win", "feat"), ("win", "seq"), ("feat", "mllib"), ("seq", "rga"),
-         ("mllib", "cmp"), ("rga", "cmp"), ("cmp", "fig")]
-HIVE_LINKS = ["ingest", "prep", "score", "win"]
+         ("mllib", "cmp"), ("rga", "cmp"), ("rga", "inf"), ("cmp", "fig")]
+HIVE_LINKS = ["ingest", "prep", "score", "win", "inf"]
 ROWS = [["drive", "audit", "hdfs", "ingest"], ["win", "score", "prep", "hive"], ["feat", "seq"],
-        ["mllib", "rga"], ["cmp", "fig", "legend"]]
+        ["mllib", "rga", "inf"], ["cmp", "fig", "legend"]]
 LEGEND = [("Spark / Spark SQL / MLlib, submitted to YARN", SPARK), ("HDFS / Hive storage", STORE),
           ("Plain Python on the Colab VM", PY), ("PyTorch on the GPU", TORCH), ("Plotly", VIZ)]
 

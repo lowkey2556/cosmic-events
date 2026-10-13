@@ -84,8 +84,9 @@ On 2026-10-11, on the WSL test machine (non-root, 3.7 GB RAM, YARN 2 GB), these 
   table readable from the Hive CLI.
 
 On 2026-10-13, on a Windows 11 laptop (local-mode Spark 3.5.9 from pip, Java 8, Python 3.12, PyTorch CPU;
-no HDFS, YARN or Hive), `pytest` passed 34 of 34 tests, including the Spark windowing, the Spark MLlib
-models on windows, the star-attrition table, RGA-Net training with its ablations, and the comparison step.
+no HDFS, YARN or Hive), `pytest` passed 36 of 36 tests, including the Spark windowing, the Spark MLlib
+models on windows, the star-attrition table, RGA-Net training with its ablations, Spark distributed
+inference of the saved RGA-Net (matching PyTorch to 1e-5), and the comparison step.
 The full pipeline on YARN with the new steps (windowing, ML models, RGA-Net, comparison, scalability) had
 not yet been run at that point; its first run is the Colab run on the real data.
 

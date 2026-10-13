@@ -33,6 +33,8 @@ the code refuses to write synthetic output to any `review2/` folder.
 | Training and validation curves | `rganet_history.csv`, `fig_rganet_training_curves.png/.html` |
 | Ablation: full vs no-gate vs observer-blind | `ablation_table.csv`, `ablation_table_star_level.csv`, `fig_ablation.png/.html` |
 | Predictions (validation and test windows, every seed and variant) | `predictions_rganet.csv` |
+| Trained models | `work/models/rganet_<variant>_seed<seed>.pt` |
+| Distributed inference: Spark applies the trained model to all windows | `src/cosmic/infer.py`; Hive table `window_predictions`; `window_predictions_summary.csv`; `distributed_inference_check.csv` (Spark vs PyTorch) |
 
 ## Requirement 3 — Comparison with 4 ML algorithms (table and graphs)
 
@@ -68,7 +70,8 @@ the code refuses to write synthetic output to any `review2/` folder.
 | 5 Windowing (Spark) | `windows.py`, `windowing.py`, `splits.py` | `windows`, `window_features`, `window_sequences`, `splits`; `work/windows_seq.npz` |
 | 6 K-Means (MLlib, supporting) | `cluster.py` | `star_clusters` |
 | 7 ML models (MLlib) | `classify.py` | `ml_predictions` |
-| 8 RGA-Net (PyTorch) | `rganet.py` | `predictions_rganet.csv` |
+| 8 RGA-Net (PyTorch) | `rganet.py` | `predictions_rganet.csv`, `work/models/*.pt` |
+| 8b Distributed inference (Spark `mapInPandas`) | `infer.py` | `window_predictions` |
 | 9 Comparison | `compare.py`, `evaluation.py` | tables, figures, `COMPARISON.md` |
 | 10 Scalability (YARN, 1/2/4 executors × 3 runs) | `scalability.py` | `scalability.csv`, `scalability_runs.csv`, `fig_scalability.png/.html` |
 | Architecture diagram (Graphviz) | `architecture.py` | `architecture.png/.svg/.dot` (copies in `docs/figures/`) |
@@ -85,7 +88,7 @@ Not built yet, by design: Tableau exports, dashboards and final visualisations.
 | Synthetic data never in results | `config.py` refuses `review2` for synthetic runs; test `test_synthetic_outputs_never_go_to_review2` |
 | No duplicated, padded or synthetic rows in the dataset | the audit reports repeated rows and the size **after** removing them |
 | Big Data stack does ingestion, preprocessing, windowing, features and the 4 ML models | `ingest.py`, `preprocess.py`, `observer_score.py`, `windows.py`, `classify.py` (Spark, Spark SQL, Hive, MLlib on YARN) |
-| PyTorch only for the deep learning model | `rganet.py` only |
+| PyTorch only for the deep learning model | `rganet.py` (training); `infer.py` runs the same model inside Spark executors |
 | Plotly only (no Matplotlib/Seaborn) | `plots.py`; test `test_no_matplotlib_or_seaborn_anywhere` |
 
 Smoke-test evidence (notebook section 3): HDFS put/list, YARN ResourceManager up, SparkPi on YARN,

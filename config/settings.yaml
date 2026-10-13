@@ -130,6 +130,10 @@ rganet:
   grad_clip: 1.0
   variants: [full, no_gate, observer_blind]
 
+# Distributed inference (Spark): which trained RGA-Net variants are applied to all windows.
+infer:
+  variants: [full]                             # one model per split seed; add no_gate / observer_blind if wanted
+
 # Scalability: Spark preprocessing + windowing through YARN at 1, 2 and 4 executors, 3 runs each.
 scalability:
   executors: [1, 2, 4]

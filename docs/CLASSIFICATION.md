@@ -81,7 +81,14 @@ window; **one shared implementation** (`src/cosmic/evaluation.py`) then computes
 
 All runs use the same windows, splits, seeds and settings.
 
-## 6. Outputs (in `outputs/review2/`)
+## 6. Distributed inference
+
+After training, Spark applies the saved RGA-Net models (one per split) to **every** window in
+parallel (`mapInPandas`, Step 8b) and writes the Hive table `window_predictions` (window, star,
+label, seed, set, probability). The metrics above come from the same probabilities: the check
+file `distributed_inference_check.csv` shows the Spark and PyTorch values agree.
+
+## 7. Outputs (in `outputs/review2/`)
 
 `comparison_table.csv` (window level) and `comparison_table_star_level.csv`; `ablation_table.csv`;
 `ml_observer_features_table.csv`; `metrics_per_seed.csv` (every number before averaging);
@@ -90,7 +97,7 @@ All runs use the same windows, splits, seeds and settings.
 and `COMPARISON.md`, written from the numbers, which states which model is best on which metric,
 by how much, and whether the gap is larger than the seed-to-seed spread.
 
-## 7. Honest limits
+## 8. Honest limits
 
 - About 60 stars in total, so each test set holds only a few stars per class. One star can move
   recall or precision a lot; that is why every result is a mean ± std over 5 splits.

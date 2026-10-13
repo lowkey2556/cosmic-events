@@ -123,6 +123,15 @@ scaling fitted on train; grids tuned on validation; with and without observer fe
 Full model, no-gate (λ = 0) and observer-blind, each on the same 5 splits. Early stopping on validation PR-AUC."""),
     ("code", """%%time
 !python run.py rganet --data real"""),
+    ("md", """## 12b. Step 8b: Distributed inference with Spark
+Spark broadcasts the trained RGA-Net models (one per split seed) to the executors and scores **every** window in
+parallel with `mapInPandas` (a pandas UDF), writing the Hive table `window_predictions`. The probabilities on the
+validation/test windows are checked against PyTorch's own predictions."""),
+    ("code", """%%time
+!python run.py infer --data real"""),
+    ("code", """# The predictions as Hive sees them
+!hive -S -e "SELECT variant, seed, \\`set\\`, COUNT(*), ROUND(AVG(prob), 3) FROM cosmic.window_predictions GROUP BY variant, seed, \\`set\\` ORDER BY seed, \\`set\\`;" 2>/dev/null
+!hive -S -e "SELECT window_id, auid, label, seed, \\`set\\`, ROUND(prob, 4) FROM cosmic.window_predictions LIMIT 10;" 2>/dev/null"""),
     ("md", "## 13. Step 9: Comparison (tables, figures, COMPARISON.md)"),
     ("code", "!python run.py compare --data real"),
     ("md", """## 14. Step 10: Scalability (YARN with 1, 2 and 4 executors, 3 runs each)
@@ -182,6 +191,9 @@ fig('fig_roc_pr_curves'); fig('fig_confusion_matrices')"""),
     ("code", """fig('fig_rganet_training_curves')
 csv('ablation_table.csv', 'Ablation, test windows (mean ± std)'); fig('fig_ablation')
 csv('rganet_learned_lambda.csv', 'Learned gate strengths λ (full model)')"""),
+    ("md", "## Distributed inference (Spark applies RGA-Net to all windows)"),
+    ("code", """csv('distributed_inference_check.csv', 'Spark vs PyTorch probabilities (validation/test windows)')
+csv('window_predictions_summary.csv', 'Hive table window_predictions: windows and mean probability per seed and set')"""),
     ("md", "## Supplementary: ML models with vs without observer features"),
     ("code", "csv('ml_observer_features_table.csv', 'ML models, test windows (mean ± std)'); csv('ml_selected_params.csv', 'Chosen settings and training time')"),
     ("md", "## COMPARISON.md (generated from the numbers above)"),

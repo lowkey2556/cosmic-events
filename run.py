@@ -13,7 +13,9 @@ Steps, in pipeline order:
                             splits, star_attrition.csv; exports work/windows_seq.npz for PyTorch
     cluster        Step 6   K-Means on the per-star features (supporting analysis)
     classify       Step 7   the 4 ML models (Spark MLlib) on the windows, 5 splits, with/without observer features
-    rganet         Step 8   RGA-Net + ablations (PyTorch, GPU if available; no Spark needed)
+    rganet         Step 8   RGA-Net + ablations (PyTorch, GPU if available; no Spark needed); saves the models
+    infer          Step 8b  distributed inference: Spark applies the trained RGA-Net to ALL windows in parallel
+                            (mapInPandas) and writes the Hive table window_predictions
     compare        Step 9   comparison tables, Plotly figures, COMPARISON.md (no Spark needed)
     scalability    Step 10  preprocessing + windowing through YARN at 1, 2, 4 executors, 3 runs each
     all                     audit .. compare in order (not scalability)
@@ -34,9 +36,10 @@ sys.stdout.reconfigure(line_buffering=True)  # show progress live in Colab "!pyt
 
 from cosmic.config import load_config  # noqa: E402
 
-SPARK_STEPS = ["ingest", "preprocess", "score", "features", "windows", "cluster", "classify"]
+SPARK_STEPS = ["ingest", "preprocess", "score", "features", "windows", "cluster", "classify", "infer"]
 LOCAL_STEPS = ["audit", "architecture", "rganet", "compare", "scalability"]
-ALL = ["audit", "architecture", *SPARK_STEPS, "rganet", "compare"]
+ALL = ["audit", "architecture", "ingest", "preprocess", "score", "features", "windows", "cluster", "classify",
+       "rganet", "infer", "compare"]
 
 
 def architecture(cfg):
@@ -65,10 +68,10 @@ def run_local(step, cfg, overrides):
 
 
 def run_spark(steps, cfg, timings_json=None):
-    from cosmic import classify, cluster, features, ingest, observer_score, preprocess, windows
+    from cosmic import classify, cluster, features, infer, ingest, observer_score, preprocess, windows
     from cosmic.spark_session import get_spark
     mods = dict(ingest=ingest, preprocess=preprocess, score=observer_score, features=features, windows=windows,
-                cluster=cluster, classify=classify)
+                cluster=cluster, classify=classify, infer=infer)
     wall0 = time.time()
     spark = get_spark(cfg)
     sc = spark.sparkContext

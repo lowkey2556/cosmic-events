@@ -620,3 +620,59 @@ def test_underscore_and_padded_names():
     assert vsx_name_candidates("DY_PEG")[0] == "DY Peg"
     assert vsx_name_candidates("V603_AQL")[0] == "V0603 Aql"
     assert norm_name("DY_PEG") == norm_name("DY Peg")
+
+
+# ---------------------------------------------------------------- distributed inference (Spark + saved RGA-Net)
+def _toy_sequence_frame(data, idx):
+    """The toy windows in the shape of the Hive table window_sequences (one array column per token feature)."""
+    names = list(data["feature_names"])
+    rows = dict(window_id=data["window_id"][idx], seq_len=data["mask"][idx].sum(1).astype(int),
+                band_idx=[list(map(int, r)) for r in data["band"][idx]],
+                type_idx=[list(map(int, r)) for r in data["otype"][idx]])
+    for j, n in enumerate(names):
+        rows[n] = [list(map(float, r)) for r in data["num"][idx][..., j]]
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture(scope="module")
+def saved_models(tmp_path_factory):
+    import torch
+    from cosmic.config import load_config
+    from cosmic.rganet import load_windows, train_one
+    d = tmp_path_factory.mktemp("rga")
+    _toy_windows(d)
+    data = load_windows(str(d))
+    split = pd.read_csv(d / "splits.csv").query("seed == 1")
+    p = dict(load_config("synthetic").section("rganet"), d_model=16, heads=2, layers=1, max_epochs=3, patience=2,
+             batch_size=16)
+    out = {}
+    for v in ("full", "observer_blind"):
+        pred, _, _ = train_one(data, split, v, 1, p, torch.device("cpu"), log=lambda *_: None,
+                               save_path=str(d / f"rganet_{v}_seed1.pt"))
+        out[v] = pred
+    return d, data, out
+
+
+def test_saved_model_reproduces_training_predictions(saved_models):
+    from cosmic.rganet import load_model, predict_frame
+    d, data, preds = saved_models
+    for v, pred in preds.items():
+        model, meta = load_model(str(d / f"rganet_{v}_seed1.pt"))
+        assert meta["variant"] == v and meta["seed"] == 1
+        idx = np.flatnonzero(np.isin(data["window_id"], pred["window_id"]))
+        got = predict_frame(_toy_sequence_frame(data, idx), [(model, meta)]).set_index("window_id")["prob"]
+        want = pred.set_index("window_id")["prob"]
+        assert np.allclose(got.loc[want.index], want, atol=1e-5)          # same preprocessing, same numbers
+
+
+def test_spark_distributed_inference_matches_pytorch(spark, saved_models):
+    from cosmic.infer import OUT_SCHEMA, load_blobs, scorer
+    d, data, preds = saved_models
+    blobs = load_blobs(str(d), ["full"])
+    assert list(blobs) == ["rganet_full_seed1.pt"]
+    sdf = spark.createDataFrame(_toy_sequence_frame(data, np.arange(len(data["window_id"])))).repartition(3)
+    out = sdf.mapInPandas(scorer(spark.sparkContext.broadcast(blobs)), schema=OUT_SCHEMA).toPandas()
+    assert len(out) == len(data["window_id"]) and set(out["variant"]) == {"full"}   # every window scored once
+    ref = preds["full"].set_index("window_id")["prob"]
+    got = out.set_index("window_id")["prob"]
+    assert np.allclose(got.loc[ref.index], ref, atol=1e-5)

@@ -21,13 +21,18 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 
 @pytest.fixture(scope="session")
-def spark():
+def spark(tmp_path_factory):
     # use pip PySpark's local mode and the local filesystem, not the cluster's configuration
     for var in ("SPARK_HOME", "HADOOP_CONF_DIR", "YARN_CONF_DIR"):
         os.environ.pop(var, None)
     # local-mode Python workers inherit this, so they can import the cosmic package (get_spark ships a zip
     # with addPyFile instead; that needs winutils.exe on Windows, so tests use the environment)
-    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (os.path.join(ROOT, "src"), os.environ.get("PYTHONPATH")) if p)
+    paths = [os.path.join(ROOT, "src")]
+    if os.name == "nt":  # Windows only: workers must load torch before PyArrow (DLL order), as the driver does above
+        boot = tmp_path_factory.mktemp("worker_boot")
+        (boot / "sitecustomize.py").write_text("try:\n    import torch  # noqa: F401\nexcept ImportError:\n    pass\n")
+        paths.insert(0, str(boot))
+    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (*paths, os.environ.get("PYTHONPATH")) if p)
     from pyspark.sql import SparkSession
     s = (SparkSession.builder.master("local[2]").appName("cosmic-tests")
          .config("spark.sql.shuffle.partitions", "4")
