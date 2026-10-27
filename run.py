@@ -4,32 +4,38 @@
 
 Steps, in pipeline order:
     paths                   print the resolved paths (all derived from PROJECT_ROOT) and check them
-    audit          Step 0   dataset audit of the raw CSVs: sizes, rows, stars, 50 MB check (no Spark)
+    audit          Step 0   dataset audit of the AAVSO CSVs: sizes, rows, stars, 50 MB check (no Spark)
+    ztf_select     Phase 1  choose the ZTF DR light-curve files (tiles) to download; logs every choice
+    ztf_download   Phase 1  resumable, MD5-verified download of the chosen files to V3_ROOT/ztf_raw
+    ztf_audit      Phase 1  audit of the downloaded ZTF files (size, rows, objects, filters, dates, our stars)
+    candidates     Phase 1  faint VSX stars (mag ~13-17) to download more AAVSO data for
     architecture            architecture diagram with Graphviz: PNG + SVG + DOT (no Spark)
     ingest         Step 1   HDFS put, VSX labels, Parquet + Hive external table, partition pruning, dataset summary
     preprocess     Step 2   Spark SQL cleaning, thinning, band normalisation (+ rows per star after every step)
     score          Step 3   observer agreement scores
     features       Step 4   per-star features (used by K-Means)
-    windows        Step 5   Spark windowing: per-window ML features, RGA-Net token sequences, 5 star-grouped
-                            splits, star_attrition.csv; exports work/windows_seq.npz for PyTorch
+    windows        Step 5   Spark windowing: per-window ML features, RGA-Net token sequences, star-grouped splits
     cluster        Step 6   K-Means on the per-star features (supporting analysis)
-    classify       Step 7   the 4 ML models (Spark MLlib) on the windows, 5 splits, with/without observer features
-    rganet         Step 8   RGA-Net + ablations (PyTorch, GPU if available; no Spark needed); saves the models
-    infer          Step 8b  distributed inference: Spark applies the trained RGA-Net to ALL windows in parallel
-                            (mapInPandas) and writes the Hive table window_predictions
-    compare        Step 9   comparison tables, Plotly figures, COMPARISON.md (no Spark needed)
+    classify       Step 7   the 4 ML models (Spark MLlib) on the windows
+    rganet         Step 8   RGA-Net + ablations (PyTorch, GPU if available; no Spark); saves the models
+    infer          Step 8b  distributed inference: Spark applies the trained RGA-Net to ALL windows
+    compare        Step 9   comparison tables, Plotly figures, COMPARISON.md (no Spark)
     scalability    Step 10  preprocessing + windowing through YARN at 1, 2, 4 executors, 3 runs each
-    all                     audit .. compare in order (not scalability)
+    all                     audit .. compare in order (not the ZTF steps, not scalability)
 
-Steps can be chained with "+": `python run.py preprocess+windows` runs both in one Spark session.
-`--data real` (default) reads PROJECT_ROOT/data/*.csv and writes to PROJECT_ROOT/outputs/review2/ and
-PROJECT_ROOT/work/ (PROJECT_ROOT = /content/drive/MyDrive/cosmic_roja, or $COSMIC_PROJECT_ROOT).
-`--data synthetic` uses data/synthetic/ and writes to synthetic_run/ (never review2/).
+Fresh machines: before a Spark step runs, any Hive table it needs that is missing is rebuilt by running
+the step that makes it first (src/cosmic/pipeline.py). Spark steps run in the Python 3.12 environment
+made by setup/python_env.sh when the current Python is 3.13 or newer (PySpark 3.5 does not support it).
+
+`--data real` (default) reads PROJECT_ROOT/data/*.csv and writes only under V3_ROOT = PROJECT_ROOT/v3_5GB
+(PROJECT_ROOT = /content/drive/MyDrive/cosmic_roja, or $COSMIC_PROJECT_ROOT).
+`--data synthetic` uses data/synthetic/ and writes to synthetic_run/.
 """
 import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 
@@ -39,9 +45,11 @@ sys.stdout.reconfigure(line_buffering=True)  # show progress live in Colab "!pyt
 from cosmic.config import check_paths, load_config  # noqa: E402
 
 SPARK_STEPS = ["ingest", "preprocess", "score", "features", "windows", "cluster", "classify", "infer"]
-LOCAL_STEPS = ["paths", "audit", "architecture", "rganet", "compare", "scalability"]
+LOCAL_STEPS = ["paths", "audit", "ztf_select", "ztf_download", "ztf_audit", "candidates", "architecture",
+               "rganet", "compare", "scalability"]
 ALL = ["audit", "architecture", "ingest", "preprocess", "score", "features", "windows", "cluster", "classify",
        "rganet", "infer", "compare"]
+SPARK_PY = "/content/cosmic_py/bin/python"
 
 
 def architecture(cfg):
@@ -56,8 +64,14 @@ def run_local(step, cfg, overrides):
         return
     if step == "audit":
         from cosmic import audit
-        print(f"data folder: {cfg.raw_dir}")
+        print(f"data folder: {cfg.data_dir}")
         audit.run(cfg)
+    elif step in ("ztf_select", "ztf_download", "ztf_audit"):
+        from cosmic import ztf
+        getattr(ztf, step.replace("ztf_", "run_"))(cfg)
+    elif step == "candidates":
+        from cosmic import candidates
+        candidates.run(cfg)
     elif step == "architecture":
         architecture(cfg)
     elif step == "rganet":
@@ -71,8 +85,38 @@ def run_local(step, cfg, overrides):
         scalability.run(cfg, overrides)
 
 
-def run_spark(steps, cfg, timings_json=None):
+def spark_python():
+    """None if this interpreter can run PySpark 3.5, else the Python 3.12 environment's interpreter."""
+    if sys.version_info < (3, 13):
+        try:
+            import pyspark  # noqa: F401
+            return None
+        except ImportError:
+            pass
+    py = os.environ.get("COSMIC_SPARK_PY", SPARK_PY)
+    if not os.path.exists(py):
+        raise RuntimeError(f"Spark steps need Python <= 3.12 with PySpark, and {py} does not exist. "
+                           "Run the notebook's setup cell (it runs setup/python_env.sh) first.")
+    return py
+
+
+def run_spark(steps, cfg, args):
+    """Run Spark steps in one session, after rebuilding any missing Hive tables they need."""
+    py = spark_python()
+    if py and os.path.realpath(py) != os.path.realpath(sys.executable):
+        cmd = [py, os.path.abspath(__file__), "+".join(steps), "--data", args.data,
+               *sum((["--set", o] for o in args.set), [])]
+        if args.timings_json:
+            cmd += ["--timings-json", args.timings_json]
+        if args.only_missing:
+            cmd.append("--only-missing")
+        print(f"(Spark steps run with {py}: Python {sys.version.split()[0]} is too new for PySpark 3.5)")
+        res = subprocess.run(cmd)
+        if res.returncode:
+            raise SystemExit(res.returncode)
+        return
     from cosmic import classify, cluster, features, infer, ingest, observer_score, preprocess, windows
+    from cosmic.pipeline import plan_steps
     from cosmic.spark_session import get_spark
     mods = dict(ingest=ingest, preprocess=preprocess, score=observer_score, features=features, windows=windows,
                 cluster=cluster, classify=classify, infer=infer)
@@ -80,9 +124,13 @@ def run_spark(steps, cfg, timings_json=None):
     spark = get_spark(cfg)
     sc = spark.sparkContext
     print(f"Spark {spark.version} | master={sc.master} | app={sc.applicationId}")
+    plan = plan_steps(steps, lambda t: spark.catalog.tableExists(t, cfg.db), only_missing=args.only_missing)
+    for s, why in plan:
+        if why != "requested":
+            print(f"fresh machine: {why} -> running step '{s}' first")
     timings, granted = [], 0
     try:
-        for s in steps:
+        for s, _ in plan:
             print(f"\n{'=' * 20} STEP: {s} {'=' * 20}")
             t0 = time.time()
             mods[s].run(spark, cfg)
@@ -92,8 +140,8 @@ def run_spark(steps, cfg, timings_json=None):
     finally:
         spark.stop()
     print("\nStep timings (s):", timings)
-    if timings_json:
-        with open(timings_json, "w") as fh:
+    if args.timings_json:
+        with open(args.timings_json, "w") as fh:
             json.dump(dict(steps=timings, steps_seconds=sum(t for _, t in timings), executors_granted=granted,
                            wall_seconds=round(time.time() - wall0, 1)), fh)
 
@@ -103,6 +151,8 @@ def main(argv=None):
     ap.add_argument("step", help="one step, several joined with '+', or 'all'")
     ap.add_argument("--data", choices=["real", "synthetic"], default="real")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    ap.add_argument("--only-missing", action="store_true",
+                    help="only build the missing Hive tables the given Spark steps need, not the steps themselves")
     ap.add_argument("--timings-json", default=None, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     steps = ALL if a.step == "all" else a.step.split("+")
@@ -110,8 +160,8 @@ def main(argv=None):
     if unknown:
         ap.error(f"unknown step(s) {unknown}; choose from {SPARK_STEPS + LOCAL_STEPS}")
     cfg = load_config(a.data, a.set)
-    print(f"dataset={a.data}  hive database={cfg.db}  hdfs={cfg.hdfs_base}")
-    check_paths(cfg, need_data=bool({"paths", "audit", "ingest"} & set(steps)))  # stops on a retired or missing path
+    print(f"dataset={a.data}  hive database={cfg.db}  hdfs={cfg.hdfs_base}  python={sys.version.split()[0]}")
+    check_paths(cfg, need_data=bool({"paths", "audit", "ingest", "candidates"} & set(steps)))
     from cosmic import plots
     plots.set_export(**cfg.section("plots"))
 
@@ -122,7 +172,7 @@ def main(argv=None):
             group.append(s)
             continue
         if group:
-            run_spark(group, cfg, a.timings_json)
+            run_spark(group, cfg, a)
             group = []
         if s is not None:
             print(f"\n{'=' * 20} STEP: {s} {'=' * 20}")

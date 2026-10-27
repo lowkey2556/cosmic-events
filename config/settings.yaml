@@ -3,8 +3,9 @@
 
 # Two datasets live side by side and never mix: different HDFS base, Hive database and output folder.
 # Every real-data path is derived from ONE setting, PROJECT_ROOT (datasets.real.project_root; the
-# environment variable COSMIC_PROJECT_ROOT overrides it). See `paths:` below for the layout.
-# The retired folders MyDrive/cosmic and cosmic_OLD_do_not_use are refused by the code.
+# environment variable COSMIC_PROJECT_ROOT overrides it). Everything the v3 pipeline WRITES goes under
+# V3_ROOT = PROJECT_ROOT/v3_5GB (environment variable V3_ROOT overrides it). See `paths:` below.
+# The retired folders MyDrive/cosmic, cosmic_OLD_do_not_use and _OLD_100MB are refused by the code.
 datasets:
   real:
     project_root: /content/drive/MyDrive/cosmic_roja   # PROJECT_ROOT
@@ -18,13 +19,18 @@ datasets:
     hdfs_base: /cosmic_synth
     database: cosmic_synth
 
-# Layout under PROJECT_ROOT
 paths:
+  # read-only inputs, under PROJECT_ROOT
   data_subdir: data                            # AAVSO CSVs, directly in this folder (sub-folders are not read)
-  output_subdir: outputs/review2               # every Review 2 table and figure
-  work_subdir: work                            # models, window tensors, splits, predictions
-  labels_file: work/labels/vsx_labels.csv      # VSX rows for our stars (fetched from VizieR when missing)
-  cache_subdir: work/cache                     # Hadoop/Spark/Hive tarballs used by setup/install_stack.sh
+  cache_subdir: work/cache                     # Hadoop/Spark/Hive/Derby tarballs used by setup/install_stack.sh
+  labels_file: work/labels/vsx_labels.csv      # VSX rows for our stars (extended when new stars appear)
+  # everything written, under V3_ROOT = PROJECT_ROOT/v3_subdir
+  v3_subdir: v3_5GB
+  ztf_raw_subdir: ztf_raw                      # raw ZTF DR light-curve Parquet files (downloaded once)
+  clean_subdir: clean                          # cleaned AAVSO + ZTF Parquet
+  work_subdir: work                            # windows, .npz files, model checkpoints, run state
+  output_subdir: outputs                       # tables, figures/, captions, COMPARISON.md, DATA_FLOW.txt
+  dashboard_subdir: dashboard_data             # tidy tables for the Review 3 dashboard
   star_list: config/stars.yaml
   label_map: config/label_map.yaml
 
@@ -49,6 +55,31 @@ ingest:
   # Declination bands (degrees) used for the sky_region partition column.
   dec_band_edges: [-90, -30, 0, 30, 60, 90]
   pruning_test_year: null                      # null = the year with the most rows
+
+# ZTF public light curves (IRSA bulk Parquet, one file per field / CCD / quadrant / filter)
+ztf:
+  release: dr24
+  base_url: https://irsa.ipac.caltech.edu/data/ZTF/lc/lc_dr24
+  api_url: https://irsa.ipac.caltech.edu/cgi-bin/ZTF/nph_light_curves
+  fields_url: https://raw.githubusercontent.com/ZwickyTransientFacility/ztf_information/master/field_grid/ZTF_Fields.txt
+  target_gb: [8, 10]                           # raw download: at least 8, at most 10 GB (>= 5 GB after cleaning)
+  filters: [zg, zr, zi]
+  match_arcsec: 2.0                            # AAVSO star <-> ZTF object cross-match radius
+  saturation_mag: 12.5                         # ZTF saturates for stars brighter than about this
+  min_star_epochs: 20                          # "usable" = at least this many unsaturated epochs
+  neighbour_deg: 10                            # neighbouring fields considered (distance between field centres)
+  max_neighbour_fields: 25                     # ...at most this many, nearest first (one VSX count query each)
+  field_radius_deg: 3.5                        # VSX variables counted within this radius of a field centre
+  tmp_dir: null                                # null = /content/ztf_tmp on Colab (local disk, before copying to Drive)
+
+# Faint-star candidates for more AAVSO downloads (VSX via astroquery only; AAVSO is never scraped)
+candidates:
+  n: 40                                        # balanced: half anomalous, half normal
+  max_mag_range: [12.5, 16.0]                  # brightest (VSX 'max') magnitude: not saturated in ZTF
+  min_mag_limit: 17.5                          # faintest (VSX 'min') magnitude no fainter than this
+  dec_min: -25
+  per_type_query_limit: 10000
+  download_end_year: 2025                      # you download Jan 2022 - Jan 2025: later novae are excluded
 
 audit:
   target_mb: 50                                # Review 2 size target; 1 MB = 1,048,576 bytes

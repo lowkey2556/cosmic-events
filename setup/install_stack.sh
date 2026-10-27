@@ -9,7 +9,8 @@
 #
 # Environment overrides (all optional):
 #   STACK_HOME  install prefix         (default /opt/cosmic_stack as root, else ~/cosmic_stack)
-#   CACHE_DIR   tarball cache          (default $COSMIC_PROJECT_ROOT/work/cache, else ~/cosmic_cache)
+#   CACHE_DIR   tarball cache          (default: $COSMIC_PROJECT_ROOT/work/cache, else the Drive folder
+#                                       /content/drive/MyDrive/cosmic_roja/work/cache if it exists, else ~/cosmic_cache)
 #   PYTHON      python for PySpark     (default python3)
 #   JAVA_HOME   use an existing Java 8 instead of apt (only for non-root test machines)
 set -euo pipefail
@@ -23,13 +24,21 @@ APACHE=https://archive.apache.org/dist
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ "$(id -u)" = "0" ]; then DEFAULT_HOME=/opt/cosmic_stack; else DEFAULT_HOME="$HOME/cosmic_stack"; fi
 STACK_HOME="${STACK_HOME:-$DEFAULT_HOME}"
-if [ -n "${COSMIC_PROJECT_ROOT:-}" ]; then DEFAULT_CACHE="$COSMIC_PROJECT_ROOT/work/cache"; else DEFAULT_CACHE="$HOME/cosmic_cache"; fi
+# The cache is found WITHOUT depending on a notebook cell having set variables: the Drive project folder is
+# used whenever it is mounted, so the tarballs are never downloaded again when they are already there.
+DRIVE_CACHE=/content/drive/MyDrive/cosmic_roja/work/cache
+if [ -n "${COSMIC_PROJECT_ROOT:-}" ]; then DEFAULT_CACHE="$COSMIC_PROJECT_ROOT/work/cache"
+elif [ -d "$DRIVE_CACHE" ] || [ -d /content/drive/MyDrive/cosmic_roja ]; then DEFAULT_CACHE="$DRIVE_CACHE"
+else DEFAULT_CACHE="$HOME/cosmic_cache"; fi
 CACHE_DIR="${CACHE_DIR:-$DEFAULT_CACHE}"
 # The retired Drive folders are never read or written (tarballs are re-downloaded into work/cache instead).
 case "$CACHE_DIR" in
-  /content/drive/MyDrive/cosmic|/content/drive/MyDrive/cosmic/*|*cosmic_OLD_do_not_use*)
+  /content/drive/MyDrive/cosmic|/content/drive/MyDrive/cosmic/*|*cosmic_OLD_do_not_use*|*/_OLD_100MB|*/_OLD_100MB/*)
     echo "ERROR: CACHE_DIR=$CACHE_DIR is inside the retired folder; set COSMIC_PROJECT_ROOT=/content/drive/MyDrive/cosmic_roja"; exit 1 ;;
 esac
+# Python for PySpark: the Python 3.12 environment made by setup/python_env.sh when it exists
+# (PySpark 3.5 does not support Python 3.13), otherwise python3.
+if [ -z "${PYTHON:-}" ] && [ -x /content/cosmic_py/bin/python ]; then PYTHON=/content/cosmic_py/bin/python; fi
 PYTHON="${PYTHON:-python3}"
 mkdir -p "$STACK_HOME" "$CACHE_DIR"
 echo "== STACK_HOME=$STACK_HOME  CACHE_DIR=$CACHE_DIR  PYTHON=$PYTHON"
@@ -64,7 +73,7 @@ fetch() {  # fetch <url>  -> cached file path on stdout
       echo "$sum  $f" | sha512sum -c - >&2 || { rm -f "$f"; echo "ERROR: checksum mismatch for $f" >&2; exit 1; }
     fi
   else
-    echo "== Using cached $f" >&2
+    echo "using cached $f ($(du -h "$f" | cut -f1))" >&2
   fi
   echo "$f"
 }

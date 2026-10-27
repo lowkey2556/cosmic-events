@@ -32,6 +32,12 @@ def cpu_cores():
 def run(cfg, overrides=()):
     s = cfg.section("scalability")
     out = cfg.output_dir
+    # Fresh machine: build whatever preprocessing + windowing need (raw table, labels, observer scores)
+    # once, BEFORE the timed runs, so no timed run includes that work.
+    prep = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "run.py"), "preprocess+windows", "--data",
+                           cfg.dataset, *sum((["--set", o] for o in overrides), []), "--only-missing"])
+    if prep.returncode:
+        raise RuntimeError("could not build the tables the scalability runs need")
     rows = []
     for n in s["executors"]:
         for r in range(1, int(s["runs"]) + 1):

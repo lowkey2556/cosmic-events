@@ -28,9 +28,23 @@ def spark(tmp_path_factory):
     # local-mode Python workers inherit this, so they can import the cosmic package (get_spark ships a zip
     # with addPyFile instead; that needs winutils.exe on Windows, so tests use the environment)
     paths = [os.path.join(ROOT, "src")]
-    if os.name == "nt":  # Windows only: workers must load torch before PyArrow (DLL order), as the driver does above
+    if os.name == "nt":
+        # Windows only: torch's DLLs fail to load if PyArrow's are loaded first, so workers load torch just before
+        # their first PyArrow import. Not at worker start-up: importing torch can take longer than the ~10 s Spark
+        # gives a new Python worker to connect back.
         boot = tmp_path_factory.mktemp("worker_boot")
-        (boot / "sitecustomize.py").write_text("try:\n    import torch  # noqa: F401\nexcept ImportError:\n    pass\n")
+        (boot / "sitecustomize.py").write_text(
+            "import importlib.abc, sys\n"
+            "class _TorchFirst(importlib.abc.MetaPathFinder):\n"
+            "    def find_spec(self, name, path, target=None):\n"
+            "        if name == 'pyarrow' and 'torch' not in sys.modules:\n"
+            "            sys.meta_path.remove(self)\n"
+            "            try:\n"
+            "                import torch  # noqa: F401\n"
+            "            except ImportError:\n"
+            "                pass\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, _TorchFirst())\n")
         paths.insert(0, str(boot))
     os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (*paths, os.environ.get("PYTHONPATH")) if p)
     from pyspark.sql import SparkSession

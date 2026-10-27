@@ -1,5 +1,12 @@
 # How to run the project in Google Colab
 
+> **v3 (in progress) — read this first.** The notebook now starts with **one SETUP cell**: run it first in every
+> session. It mounts Drive, sets every path, gets the code and installs Python (including a Python 3.12 environment
+> for Spark, because PySpark 3.5 does not run on Colab's Python 3.13). Everything new is written under
+> `cosmic_roja/v3_5GB/` (outputs in `v3_5GB/outputs/`); `data/` and `work/cache/` are only read; `_OLD_100MB/` is never
+> touched. **Phase 1** (ZTF download + audit + candidate stars) is the next section after SETUP. The rest of this
+> guide still describes the v2 run and will be rewritten when v3 is finished.
+
 A step-by-step guide to running the whole Review 2 pipeline: the dataset audit, the Big Data
 stack (HDFS, YARN, Spark, Hive), preprocessing, windowing, the four ML models, RGA-Net, the
 comparison and the scalability test. Times below are rough estimates for about 100 MB of data on

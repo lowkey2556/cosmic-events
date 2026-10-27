@@ -104,11 +104,14 @@ def test_every_path_derives_from_project_root(monkeypatch, tmp_path):
     from cosmic.config import check_paths, load_config
     monkeypatch.setenv("COSMIC_PROJECT_ROOT", str(tmp_path))
     cfg = load_config("real")
+    monkeypatch.delenv("V3_ROOT", raising=False)
     p = {k: v.replace(os.sep, "/") for k, v in cfg.paths().items()}
     root = str(tmp_path).replace(os.sep, "/")
-    assert p == {"PROJECT_ROOT": root, "data (CSVs)": root + "/data", "outputs": root + "/outputs/review2",
-                 "work": root + "/work", "VSX labels file": root + "/work/labels/vsx_labels.csv",
-                 "tarball cache": root + "/work/cache"}
+    v3 = root + "/v3_5GB"
+    assert p == {"PROJECT_ROOT": root, "data (AAVSO CSVs, read only)": root + "/data",
+                 "tarball cache (read only)": root + "/work/cache", "VSX labels file": root + "/work/labels/vsx_labels.csv",
+                 "V3_ROOT (all new writes)": v3, "outputs": v3 + "/outputs", "work": v3 + "/work",
+                 "ZTF raw": v3 + "/ztf_raw", "clean": v3 + "/clean", "dashboard data": v3 + "/dashboard_data"}
     with pytest.raises(FileNotFoundError, match="data folder does not exist"):
         check_paths(cfg)                                                  # data/ missing
     (tmp_path / "data").mkdir()
@@ -116,8 +119,17 @@ def test_every_path_derives_from_project_root(monkeypatch, tmp_path):
     assert load_config("synthetic").data_dir.replace(os.sep, "/").endswith("data/synthetic/raw")  # env is real-only
 
 
+def test_no_write_folder_outside_v3_root(monkeypatch, tmp_path):
+    from cosmic.config import check_paths, load_config
+    monkeypatch.setenv("COSMIC_PROJECT_ROOT", str(tmp_path))
+    (tmp_path / "data").mkdir()
+    with pytest.raises(ValueError, match="outside V3_ROOT"):
+        check_paths(load_config("real", [f"datasets.real.output_subdir={tmp_path / 'outputs'}"]))
+
+
 @pytest.mark.parametrize("root", ["/content/drive/MyDrive/cosmic", "/content/drive/MyDrive/cosmic/",
-                                  "/content/drive/MyDrive/cosmic_OLD_do_not_use"])
+                                  "/content/drive/MyDrive/cosmic_OLD_do_not_use",
+                                  "/content/drive/MyDrive/cosmic_roja/_OLD_100MB"])
 def test_retired_folders_are_refused(monkeypatch, root):
     from cosmic.config import check_paths, is_retired, load_config
     monkeypatch.setenv("COSMIC_PROJECT_ROOT", root)
@@ -125,6 +137,7 @@ def test_retired_folders_are_refused(monkeypatch, root):
         check_paths(load_config("real"), need_data=False)
     assert not is_retired("/content/drive/MyDrive/cosmic_roja/data")    # the new project folder is fine
     assert is_retired("/content/drive/MyDrive/cosmic/cache/x.tgz")
+    assert is_retired("/content/drive/MyDrive/cosmic_roja/_OLD_100MB/outputs/x.csv")
 
 
 def test_vsx_name_candidates():
@@ -722,3 +735,151 @@ def test_duplicate_names_detected():
     from cosmic.rawfiles import duplicate_names
     assert duplicate_names(["a.csv", "b.csv", "A.CSV", "c.csv"]) == [["a.csv", "A.CSV"]]
     assert duplicate_names(["observations_1.csv", "observations_2.csv"]) == []
+
+
+# ---------------------------------------------------------------- v3 Phase 0: robustness
+def test_window_npz_has_no_object_arrays_and_loads(tmp_path):
+    from cosmic.rganet import load_windows
+    from cosmic.windows import NUM_TOKEN_FEATURES, save_window_npz
+    L = 6
+    seq = pd.DataFrame({"window_id": ["000-AAA-111#0000", "000-BBB-22#0001"], "auid": ["000-AAA-111", "000-BBB-22"],
+                        "label": [1, None], "seq_len": [6, 3], "band_idx": [[2] * L] * 2, "type_idx": [[3] * L] * 2,
+                        **{c: [[0.5] * L] * 2 for c in NUM_TOKEN_FEATURES}})
+    save_window_npz(str(tmp_path / "windows_seq.npz"), seq, L)
+    (tmp_path / "vocab.json").write_text('{"n_band": 4, "n_type": 5}')
+    z = np.load(tmp_path / "windows_seq.npz", allow_pickle=False)              # no pickle needed at all
+    assert all(z[k].dtype != object for k in z.files)
+    assert z["window_id"].dtype.kind == "U" and list(z["auid"]) == ["000-AAA-111", "000-BBB-22"]
+    d = load_windows(str(tmp_path))
+    assert d["num"].shape == (2, L, len(NUM_TOKEN_FEATURES)) and list(d["label"]) == [1, -1]
+    assert d["mask"].sum(1).tolist() == [6, 3]
+    # a file written the old way (object string arrays) still loads
+    np.savez(tmp_path / "windows_seq.npz", **{**{k: z[k] for k in z.files},
+                                             "window_id": np.array(list(z["window_id"]), dtype=object)})
+    assert list(load_windows(str(tmp_path))["window_id"]) == list(z["window_id"])
+
+
+def test_fresh_machine_rebuilds_missing_tables_in_order():
+    from cosmic.pipeline import plan_steps
+    none = lambda t: False
+    assert [s for s, _ in plan_steps(["infer"], none)] == ["ingest", "preprocess", "score", "windows", "infer"]
+    assert [s for s, _ in plan_steps(["classify"], none)] == ["ingest", "preprocess", "score", "windows", "classify"]
+    every = lambda t: True
+    assert plan_steps(["infer"], every) == [("infer", "requested")]          # nothing rebuilt when tables exist
+    partial = lambda t: t in {"observations_raw", "star_labels", "observations_flat"}
+    assert [s for s, _ in plan_steps(["score"], partial)] == ["preprocess", "score"]
+    # scalability: only the missing prerequisites, not the timed steps themselves
+    assert [s for s, _ in plan_steps(["preprocess", "windows"], partial, only_missing=True)] == ["preprocess", "score"]
+    assert plan_steps(["preprocess", "windows"], every, only_missing=True) == []
+
+
+def test_install_script_finds_drive_cache_without_env_vars():
+    text = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "setup", "install_stack.sh"),
+                encoding="utf-8").read()
+    assert "DRIVE_CACHE=/content/drive/MyDrive/cosmic_roja/work/cache" in text
+    assert 'echo "using cached $f' in text and "_OLD_100MB" in text
+
+
+# ---------------------------------------------------------------- v3 Phase 1: ZTF and candidates (no network)
+def test_ztf_checksum_and_field_parsing():
+    from cosmic.ztf import parse_checksums, parse_field_centres
+    idx = parse_checksums("6cff324f8bfb274c12e807a7385d87e1  ./0/field000199/ztf_000199_zg_c09_q1_dr24.parquet\n"
+                          "2f74  ./1/field001240/ztf_001240_zr_c16_q4_dr24.parquet\nnot a line\n")
+    assert idx.to_dict("records") == [
+        dict(rel_path="0/field000199/ztf_000199_zg_c09_q1_dr24.parquet", md5="6cff324f8bfb274c12e807a7385d87e1",
+             field=199, filter="zg", ccd=9, q=1),
+        dict(rel_path="1/field001240/ztf_001240_zr_c16_q4_dr24.parquet", md5="2f74", field=1240, filter="zr", ccd=16, q=4)]
+    f = parse_field_centres("% ID RA Dec Ebv GalLong GalLat EclLong EclLat Entry\n"
+                            "000600     10.0  24.0   0.1   120.0  -38.5   20.0   15.0   1\n")
+    assert f.to_dict("records") == [dict(field=600, ra=10.0, dec=24.0, gal_lat=-38.5)]
+
+
+def test_ztf_budget_saturation_and_separation():
+    from cosmic.ztf import ang_sep_deg, api_int, fill_to_budget, unsaturated_mask
+    assert (api_int("0xd"), api_int("0x1"), api_int(731), api_int("731")) == (13, 1, 731, 731)  # API hex ids
+    c = pd.DataFrame({"size_bytes": [4, 4, 4, 1]})
+    assert fill_to_budget(0, c, 8, 10) == ([0, 1], 8)                         # stops once the minimum is reached
+    assert fill_to_budget(5, c, 9, 10) == ([0], 9)
+    assert fill_to_budget(5, c, 10, 10) == ([0, 3], 10)                       # skips files that would exceed max
+    m = unsaturated_mask([11.0, 13.0, 14.0, np.nan], [0, 0, 32768, 0], 12.5)
+    assert m.tolist() == [False, True, False, False]                          # saturated / flagged / missing out
+    assert ang_sep_deg(10.0, 20.0, 10.0, 21.0) == pytest.approx(1.0)
+    assert ang_sep_deg(0.0, 0.0, 0.0, 2 / 3600) * 3600 == pytest.approx(2.0)
+
+
+def test_candidates_balanced_across_classes_and_types():
+    from cosmic.candidates import GCVS_NAME, balanced_pick
+    c = pd.DataFrame({"label": [1] * 6 + [0] * 6, "primary_type": ["UGSS"] * 4 + ["NL"] * 2 + ["M"] * 3 + ["EA"] * 3,
+                      "rank": range(12)})
+    p = balanced_pick(c, 6)
+    assert (p["label"] == 1).sum() == 3 and (p["label"] == 0).sum() == 3
+    assert set(p.loc[p["label"] == 1, "primary_type"]) == {"UGSS", "NL"}       # types are spread, not one type only
+    assert GCVS_NAME.match("SS Cyg") and GCVS_NAME.match("V1504 Cyg") and GCVS_NAME.match("omi Cet")
+    assert not GCVS_NAME.match("CSS 101127:000130+050624") and not GCVS_NAME.match("ASASSN-13cx")
+
+
+def _ztf_test_project(tmp_path):
+    """A tiny project with one AAVSO star and one synthetic ZTF DR-format file (test data only)."""
+    import hashlib
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from cosmic.config import load_config
+    from cosmic.rawfiles import RAW_COLUMNS
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "a.csv").write_text(",".join(RAW_COLUMNS) + "\n1,SS CYG,000-BCP-220,2460676.6,12.5,0.05,False,V,CCD,ABC,,,,,,,,,\n")
+    (tmp_path / "labels.csv").write_text("auid,name,ra,dec,type\n000-BCP-220,SS Cyg,10.0,20.0,UGSS\n")
+    src = tmp_path / "src"
+    src.mkdir()
+    name = "ztf_000600_zr_c01_q1_dr24.parquet"
+    t = pa.table({"objectid": [1, 2, 3], "filterid": pa.array([2, 2, 2], pa.int8()), "fieldid": pa.array([600] * 3, pa.int16()),
+                  "rcid": pa.array([0] * 3, pa.int8()), "objra": pa.array([10.0, 10.1, 10.0 + 1 / 3600], pa.float32()),
+                  "objdec": pa.array([20.0, 20.1, 20.0], pa.float32()), "nepochs": [4, 2, 3],
+                  "hmjd": [[58300.0, 58301.0, 58302.0, 58303.0], [58300.5, 58310.0], [59000.0, 59001.0, 59002.0]],
+                  "mag": pa.array([[11.0, 13.0, 14.0, 15.0], [18.0, 18.1], [16.0, 16.1, 16.2]], pa.list_(pa.float32())),
+                  "magerr": pa.array([[0.01] * 4, [0.1] * 2, [0.05] * 3], pa.list_(pa.float32())),
+                  "clrcoeff": pa.array([[0.1] * 4, [0.1] * 2, [0.1] * 3], pa.list_(pa.float32())),
+                  "catflags": pa.array([[0, 0, 32768, 0], [0, 0], [0, 0, 0]], pa.list_(pa.int32()))})
+    pq.write_table(t, src / name)
+    md5 = hashlib.md5((src / name).read_bytes()).hexdigest()
+    cfg = load_config("synthetic", [f"datasets.synthetic.project_root={tmp_path}", f"datasets.synthetic.data_subdir={data}",
+                                    f"datasets.synthetic.labels_file={tmp_path / 'labels.csv'}",
+                                    f"datasets.synthetic.output_subdir={tmp_path / 'out'}",
+                                    f"ztf.tmp_dir={tmp_path / 'ztftmp'}"])
+    sel = pd.DataFrame([dict(rel_path=f"0/field000600/{name}", md5=md5, field=600, filter="zr", ccd=1, q=1,
+                             url=(src / name).as_uri(), size_bytes=(src / name).stat().st_size, priority=1,
+                             reason="contains AAVSO star(s): SS Cyg")])
+    sel.to_csv(os.path.join(cfg.output_dir, "ztf_selection.csv"), index=False)
+    pd.DataFrame([dict(auid="000-BCP-220", name="SS Cyg", label=1, field=600, ccd=1, q=1, filter="zr", epochs=7,
+                       unsaturated=5, median_mag=15.0)]).to_csv(os.path.join(cfg.output_dir, "ztf_star_tiles.csv"), index=False)
+    return cfg, sel, name
+
+
+def test_ztf_download_verifies_resumes_and_audit_counts(tmp_path, monkeypatch, capsys):
+    from cosmic import ztf
+    monkeypatch.setattr(ztf.shutil, "which", lambda _: None)                 # no wget on the test machine: urllib
+    cfg, sel, name = _ztf_test_project(tmp_path)
+    ztf.run_download(cfg)
+    dest = os.path.join(cfg.ztf_raw_dir, "field000600", name)
+    assert os.path.exists(dest) and ztf.md5_of(dest) == sel["md5"].iat[0]
+    assert "downloaded, checksum OK" in capsys.readouterr().out
+    ztf.run_download(cfg)                                                       # second run: nothing to do
+    assert "to download: 0" in capsys.readouterr().out
+    assert len(pd.read_csv(os.path.join(cfg.ztf_raw_dir, "MANIFEST.csv"))) == 1
+    s = ztf.run_audit(cfg).set_index("item")["value"]
+    assert s["files"] == 1 and s["light curves (rows: one per object and filter)"] == 3
+    assert s["epochs (photometric points)"] == 9 and s["filters"] == "zr"
+    assert s["AAVSO stars found in the downloaded ZTF files (2 arcsec)"] == 1
+    st = pd.read_csv(os.path.join(cfg.output_dir, "ztf_aavso_stars.csv"))
+    # objects 1 and 3 are within 2"; object 1: 11.0 saturated, 14.0 flagged -> 2 unsaturated; object 3: 3
+    assert sorted(st["objectid"]) == [1, 3] and st["unsaturated"].sum() == 5
+
+
+def test_ztf_download_stops_on_checksum_mismatch(tmp_path, monkeypatch):
+    from cosmic import ztf
+    monkeypatch.setattr(ztf.shutil, "which", lambda _: None)
+    cfg, sel, _ = _ztf_test_project(tmp_path)
+    sel.assign(md5="0" * 32).to_csv(os.path.join(cfg.output_dir, "ztf_selection.csv"), index=False)
+    with pytest.raises(RuntimeError, match="MD5 mismatch"):
+        ztf.run_download(cfg)
+    assert not os.path.exists(os.path.join(cfg.ztf_raw_dir, "MANIFEST.csv"))   # nothing recorded as verified

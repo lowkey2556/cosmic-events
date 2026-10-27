@@ -10,63 +10,80 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CELLS = [
-    ("md", """# Cosmic Event Crowdsourcing Platform: Review 2
+    ("md", """# Cosmic Event Crowdsourcing Platform: Review 2 (v3)
 
-Detects anomalous (eruptive) variable stars in crowdsourced **AAVSO** observations. The proposed model,
-**RGA-Net** (Reliability-Gated Attention Network), is a Transformer encoder (Vaswani et al., 2017) whose attention
-is gated by each observer's measured reliability (the gate is our contribution). It is compared with four Spark MLlib models on the same windows and
-the same 5 star-grouped splits.
+Detects anomalous (eruptive) variable stars in crowdsourced **AAVSO** observations. The proposed model, **RGA-Net**
+(Reliability-Gated Attention Network), is a Transformer encoder (Vaswani et al., 2017) whose attention is gated by each
+observer's measured reliability (the gate is our contribution). **ZTF** public light curves add Big Data scale,
+pre-training data and an independent check of observer reliability.
 
-**Stack inside this Colab VM:** Hadoop 3.3.6 (HDFS + YARN, pseudo-distributed) · Spark 3.5.9 on YARN · Spark SQL ·
-Hive 3.1.3 metastore · Spark MLlib · PyTorch (RGA-Net only, on the GPU). **Every graph is a Plotly figure**, shown
-inline and saved as PNG (slides) + interactive HTML. The architecture diagram is drawn with Graphviz.
+**Stack inside this Colab VM:** Hadoop 3.3.6 (HDFS + YARN) · Spark 3.5.9 on YARN · Spark SQL · Hive 3.1.3 · Spark MLlib ·
+PyTorch (RGA-Net only). Charts: Plotly. Diagram: Graphviz.
 
-Use a **GPU runtime** (Runtime → Change runtime type → T4 GPU). Step-by-step guide: `docs/COLAB_GUIDE.md`.
-Every path comes from one setting, `PROJECT_ROOT` (`MyDrive/cosmic_roja`): CSVs in `data/`, results in
-`outputs/review2/` (shown at the end of the notebook), models, labels and the tarball cache in `work/`."""),
-    ("md", "## 0. Mount Google Drive and get the code"),
-    ("code", """from google.colab import drive
-drive.mount('/content/drive')"""),
-    ("code", """REPO_URL = "https://github.com/lowkey2556/cosmic-events.git"
-import os
-if not os.path.isdir('/content/cosmic/.git'):
-    !git clone -q "$REPO_URL" "/content/cosmic"
-else:
-    !cd "/content/cosmic" && git pull -q
-%cd /content/cosmic
-!git log --oneline | head -5"""),
-    ("md", """### Project folder and path check
-Every path is derived from `PROJECT_ROOT`. The AAVSO CSVs must be **directly inside** `PROJECT_ROOT/data/`
-(only that folder is read). This cell prints the resolved paths and **stops** if `data/` is missing, if any path points
-at the retired folders (`MyDrive/cosmic`, `cosmic_OLD_do_not_use`), if CSVs are in sub-folders of `data/`, or if two
-files have the same name. Stars are identified by `auid`, never by file name."""),
+**How to run:** use a GPU runtime (Runtime → Change runtime type → T4 GPU), run the **SETUP** cell first, then the
+sections in order. Guide: `docs/COLAB_GUIDE.md`. Everything new is written under `cosmic_roja/v3_5GB/`; `data/` and
+`work/cache/` are only read."""),
+    ("md", """## SETUP — run this first, every session
+Mounts Drive, sets **every** path and environment variable, gets or updates the code, and installs Python: a Python 3.12
+environment for the Spark steps (PySpark 3.5 does not support Python 3.13) and the notebook's own packages. It then prints
+the resolved paths and **stops** if `data/` is missing or holds CSVs in sub-folders or duplicate names, or if a path points
+at a retired folder (`MyDrive/cosmic`, `cosmic_OLD_do_not_use`, `_OLD_100MB`). Takes 2–4 minutes."""),
     ("code", """PROJECT_ROOT = "/content/drive/MyDrive/cosmic_roja"
-import os, sys
-os.environ["COSMIC_PROJECT_ROOT"] = PROJECT_ROOT      # every `!python run.py` and `!bash setup/...` below reads this
+REPO_URL = "https://github.com/lowkey2556/cosmic-events.git"
+import os, subprocess, sys
+from google.colab import drive
+drive.mount("/content/drive")
+os.environ.update(COSMIC_PROJECT_ROOT=PROJECT_ROOT, V3_ROOT=f"{PROJECT_ROOT}/v3_5GB", CACHE_DIR=f"{PROJECT_ROOT}/work/cache",
+                  COSMIC_SPARK_PY="/content/cosmic_py/bin/python", PYTHON="/content/cosmic_py/bin/python")
+
+def sh(cmd):
+    # run a shell command, show its output live, stop the notebook if it fails
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in p.stdout:
+        print(line, end="")
+    if p.wait():
+        raise RuntimeError(f"command failed ({p.returncode}): {cmd}")
+
+if os.path.isdir("/content/cosmic/.git"):
+    sh("git -C /content/cosmic pull -q")
+else:
+    sh(f"git clone -q {REPO_URL} /content/cosmic")
+os.chdir("/content/cosmic")
 sys.path.insert(0, "/content/cosmic/src")
+sh("git log --oneline | head -3")
+sh("bash setup/python_env.sh")
 from cosmic.config import check_paths, load_config
 from cosmic.rawfiles import list_csv_files
 cfg = load_config("real")
-print("Resolved paths:")
-check_paths(cfg)                          # stops on a retired-folder path or a missing data/ folder
-files = list_csv_files(cfg.data_dir)      # stops on CSVs in sub-folders or duplicate file names
+print("\\nResolved paths:")
+check_paths(cfg)
+files = list_csv_files(cfg.data_dir)
 assert files, f"No CSV files directly in {cfg.data_dir}"
-print()
-print(f"{len(files)} CSV files directly in {cfg.data_dir}, {sum(os.path.getsize(f) for f in files) / 2**20:.1f} MB")
-OUT = cfg.paths()["outputs"]"""),
-    ("code", """# GPU check (RGA-Net trains on the GPU if there is one; everything else uses the CPU)
+print(f"{len(files)} AAVSO CSV files in data/, {sum(os.path.getsize(f) for f in files) / 2**20:.1f} MB")
 import torch
-print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "NONE - choose Runtime > Change runtime type > T4 GPU")
-!nproc; free -g | head -2"""),
-    ("md", """## Step 0: Dataset audit (plain Python, runs before the Big Data stack)
+print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "NONE (Runtime > Change runtime type > T4 GPU)")
+print("Python", sys.version.split()[0], "| CPU cores:", os.cpu_count())
+print("SETUP OK")"""),
+    ("md", """## Phase 1 — ZTF light curves and new AAVSO candidates
+No Big Data stack needed for these four cells. **Run them in order**; each can be re-run safely.
+
+1. **Choose ZTF files**: cone-searches ZTF at every AAVSO star, then picks the light-curve files (tiles) that contain
+   our stars plus neighbouring tiles rich in labelled VSX variables, up to 8–10 GB. Logs every choice and the reason.
+2. **Download**: resumable and MD5-verified; files already in Drive are skipped, so after a disconnect just run it again.
+3. **ZTF audit**: files, GB, rows, objects, filters, date range, and our AAVSO stars found in ZTF (unsaturated epochs).
+4. **Candidate stars** for more AAVSO downloads (VSX only)."""),
+    ("code", "!python run.py ztf_select     # about 5-15 min (one ZTF query per star, file sizes, VSX counts)"),
+    ("code", "!python run.py ztf_download   # about 10-40 min for 8-10 GB; prints progress and time left"),
+    ("code", "!python run.py ztf_audit      # about 5-15 min (reads every downloaded file)"),
+    ("code", "!python run.py candidates     # about 5-10 min (VSX queries); writes v3_5GB/outputs/aavso_candidate_stars.csv"),
+    ("md", """## Step 0: AAVSO dataset audit (plain Python, runs before the Big Data stack)
 Per file and in total: size in MB, rows, stars, observers and date range; PASS/FAIL against 50 MB, both as stored
 and after removing observations repeated across overlapping downloads; per star: rows, observers, dates, coverage,
 windows; class balance; skipped files; unmatched VSX types. (1 MB = 1,048,576 bytes.)"""),
-    ("code", """!pip -q install pyyaml astropy astroquery "plotly==5.24.1" "kaleido==0.2.1"
-!python run.py audit --data real"""),
+    ("code", "!python run.py audit --data real"),
     ("md", """## 1. Install the stack
-Java 8 comes from apt. Hadoop, Spark, Hive and Derby tarballs are cached in `PROJECT_ROOT/work/cache/`, so a reinstall
-after a Colab reset only extracts them. The first run downloads about 1.5 GB."""),
+Java 8 comes from apt. Hadoop, Spark, Hive and Derby tarballs are read from `PROJECT_ROOT/work/cache/` (the cell prints
+`using cached <file>` for each), so they are only downloaded if they are not there yet."""),
     ("code", """%%time
 !bash setup/install_stack.sh"""),
     ("md", "## 2. Start HDFS, YARN, the Derby network server and the Hive metastore"),
@@ -150,7 +167,7 @@ Re-runs preprocessing + windowing 9 times, so it takes a while. Run it last.""")
 import pandas as pd
 import plotly.io as pio
 from IPython.display import Image, Markdown, display
-OUT = os.path.join(os.environ["COSMIC_PROJECT_ROOT"], "outputs", "review2")   # from PROJECT_ROOT (cell at the top)
+OUT = os.path.join(os.environ.get("V3_ROOT", "/content/drive/MyDrive/cosmic_roja/v3_5GB"), "outputs")
 pd.set_option('display.width', 220); pd.set_option('display.max_columns', 30); pd.set_option('display.max_rows', 120)
 def csv(name, title=None):
     display(Markdown(f'**{{title or name}}**'))

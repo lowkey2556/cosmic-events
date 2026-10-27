@@ -1,0 +1,12 @@
+# Packages for Colab's own Python (the notebook, and the steps that run without Spark: audit, ZTF
+# download and audit, RGA-Net training with Colab's CUDA PyTorch, comparison and charts).
+# The Spark steps use the separate Python 3.12 environment from requirements.txt (setup/python_env.sh).
+pyyaml
+numpy
+pandas>=2.0,<3
+pyarrow
+plotly==5.24.1
+kaleido==0.2.1
+astropy
+astroquery
+requests

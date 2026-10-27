@@ -152,7 +152,9 @@ class RGANet(nn.Module):
 
 # ------------------------------------------------------------------ data
 def load_windows(work_dir):
-    z = np.load(os.path.join(work_dir, "windows_seq.npz"), allow_pickle=False)
+    # allow_pickle=True: our own file. Strings are saved fixed-width, so this also reads files written
+    # before that fix (which stored them as object arrays)
+    z = np.load(os.path.join(work_dir, "windows_seq.npz"), allow_pickle=True)
     data = {k: z[k] for k in z.files}
     with open(os.path.join(work_dir, "vocab.json")) as fh:
         data["vocab"] = json.load(fh)

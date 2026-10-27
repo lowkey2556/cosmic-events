@@ -193,20 +193,35 @@ def export_npz(spark, cfg, vb, vt):
     seq = spark.sql(f"""SELECT s.*, f.auid, f.label FROM {cfg.table('window_sequences')} s
                         JOIN {cfg.table('window_features')} f ON s.window_id = f.window_id
                         ORDER BY s.window_id""").toPandas()
-    L = int(cfg.section("windows")["seq_len"])
-    num = np.stack([np.stack([np.asarray(v, np.float32) for v in seq[c]]) for c in NUM_TOKEN_FEATURES], axis=-1)
-    mask = np.arange(L)[None, :] < seq["seq_len"].to_numpy()[:, None]
     path = os.path.join(cfg.work_dir, "windows_seq.npz")
-    np.savez_compressed(path, num=num, mask=mask,
-                        band=np.stack([np.asarray(v, np.int64) for v in seq["band_idx"]]),
-                        otype=np.stack([np.asarray(v, np.int64) for v in seq["type_idx"]]),
-                        label=seq["label"].fillna(-1).astype(int).to_numpy(),
-                        window_id=seq["window_id"].astype(str).to_numpy(), auid=seq["auid"].astype(str).to_numpy(),
-                        feature_names=np.array(NUM_TOKEN_FEATURES))
+    n = save_window_npz(path, seq, int(cfg.section("windows")["seq_len"]))
     with open(os.path.join(cfg.work_dir, "vocab.json"), "w") as fh:
         json.dump(dict(band=vb, obs_type=vt, n_band=len(vb) + 2, n_type=len(vt) + 2), fh, indent=1)
-    print(f"saved {path}: {num.shape[0]} windows x {L} tokens x {num.shape[2]} numeric features")
+    print(f"saved {path}: {n} windows")
     return path
+
+
+def fixed_str(values):
+    """Strings as a fixed-width NumPy array ('<U..'), never an object array, so the .npz file can be
+    loaded without pickle on any NumPy version."""
+    values = [str(v) for v in values]
+    return np.array(values, dtype=f"<U{max([len(v) for v in values] + [1])}")
+
+
+def save_window_npz(path, seq, L):
+    """Token arrays (N x L x features), mask, band/type indices, labels and the window/star ids."""
+    num = np.stack([np.stack([np.asarray(v, np.float32) for v in seq[c]]) for c in NUM_TOKEN_FEATURES], axis=-1) \
+        if len(seq) else np.zeros((0, L, len(NUM_TOKEN_FEATURES)), np.float32)
+    mask = np.arange(L)[None, :] < seq["seq_len"].to_numpy()[:, None]
+    np.savez_compressed(path, num=num, mask=mask,
+                        band=np.stack([np.asarray(v, np.int64) for v in seq["band_idx"]]) if len(seq) else
+                        np.zeros((0, L), np.int64),
+                        otype=np.stack([np.asarray(v, np.int64) for v in seq["type_idx"]]) if len(seq) else
+                        np.zeros((0, L), np.int64),
+                        label=seq["label"].fillna(-1).astype(int).to_numpy(),
+                        window_id=fixed_str(seq["window_id"]), auid=fixed_str(seq["auid"]),
+                        feature_names=fixed_str(NUM_TOKEN_FEATURES))
+    return int(num.shape[0])
 
 
 def star_attrition(spark, cfg, per_star_windows, splits):
