@@ -72,6 +72,12 @@ ztf:
   field_radius_deg: 3.5                        # VSX variables counted within this radius of a field centre
   tmp_dir: null                                # null = /content/ztf_tmp on Colab (local disk, before copying to Drive)
 
+# VizieR (for VSX): tried in this order; the first server that answers a quick test query is used.
+vizier:
+  servers: [vizier.cds.unistra.fr, vizier.cfa.harvard.edu, vizier.iucaa.in, vizier.nao.ac.jp]
+  probe_timeout_s: 30
+  timeout_s: 180
+
 # Faint-star candidates for more AAVSO downloads (VSX via astroquery only; AAVSO is never scraped)
 candidates:
   n: 40                                        # balanced: half anomalous, half normal

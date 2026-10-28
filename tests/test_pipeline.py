@@ -883,3 +883,42 @@ def test_ztf_download_stops_on_checksum_mismatch(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="MD5 mismatch"):
         ztf.run_download(cfg)
     assert not os.path.exists(os.path.join(cfg.ztf_raw_dir, "MANIFEST.csv"))   # nothing recorded as verified
+
+
+def test_vizier_falls_back_to_a_mirror(monkeypatch):
+    import astroquery.vizier
+    from cosmic import vizier as vz
+    calls = []
+
+    class FakeVizier:
+        def __init__(self, vizier_server=None, **kw):
+            self.srv = vizier_server
+
+        def query_constraints(self, **kw):
+            calls.append(self.srv)
+            if self.srv == "down.example":
+                raise ConnectionError("connect timeout")
+            return [[{"Name": "SS Cyg"}]]
+
+    monkeypatch.setattr(astroquery.vizier, "Vizier", FakeVizier)
+    vz._working.clear()
+    assert vz.pick_server(["down.example", "mirror.example", "never.example"]) == "mirror.example"
+    assert calls == ["down.example", "mirror.example"]                       # stops at the first that answers
+    assert vz.pick_server(["down.example", "mirror.example", "never.example"]) == "mirror.example"
+    assert calls == ["down.example", "mirror.example"]                       # remembered: no new test queries
+    vz._working.clear()
+    with pytest.raises(RuntimeError, match="No VizieR server answered"):
+        vz.pick_server(["down.example"])
+
+
+def test_field_ranking_without_vizier(monkeypatch):
+    from cosmic import vizier as vz
+    from cosmic import ztf
+    from cosmic.config import load_config
+
+    def unreachable(*a, **k):
+        raise RuntimeError("No VizieR server answered (x)")
+
+    monkeypatch.setattr(vz, "pick_server", unreachable)
+    centres = pd.DataFrame({"field": [1, 2], "ra": [10.0, 20.0], "dec": [5.0, 6.0]})
+    assert ztf.vsx_richness(load_config("synthetic"), centres, 3.5) is None    # caller ranks by distance instead

@@ -49,17 +49,16 @@ def query_type(v, t, c):
 
 
 def run(cfg):
-    from astroquery.vizier import Vizier
-
     from .labels import norm_name, primary_type
+    from .vizier import vizier
     from .ztf import aavso_stars, ang_sep_deg, http_get, parse_field_centres
     c = cfg.section("candidates")
     lm = cfg.load_yaml("label_map")
     seps = lm.get("type_separators")
     ours = aavso_stars(cfg)
     our_names = set(ours["data_name"].map(norm_name)) | set(ours["name"].dropna().map(norm_name))
-    v = Vizier(columns=["Name", "V", "RAJ2000", "DEJ2000", "Type", "max", "n_max", "f_min", "min", "n_min", "Period"],
-               row_limit=int(c["per_type_query_limit"]))
+    v = vizier(cfg, columns=["Name", "V", "RAJ2000", "DEJ2000", "Type", "max", "n_max", "f_min", "min", "n_min",
+                             "Period"], row_limit=int(c["per_type_query_limit"]))
     frames = []
     for label, types in ((1, lm["anomalous"]), (0, lm["normal"])):
         for t in types:
@@ -74,6 +73,9 @@ def run(cfg):
                 frames.append(d)
             print(f"  {t:5s}: {len(d)} stars in range", flush=True)
             time.sleep(1.0)
+    if not frames:
+        raise RuntimeError("Every VSX query failed or returned nothing, so no candidates could be chosen. "
+                           "Check the messages above and run the cell again later.")
     cands = pd.concat(frames, ignore_index=True)
     min_is_mag = cands["f_min"].fillna("").astype(str).str.strip() != "("
     # 'min' must be a real magnitude: not an amplitude ('(' flag) and fainter (larger) than 'max'

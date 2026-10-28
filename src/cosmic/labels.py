@@ -96,11 +96,12 @@ def vsx_name_candidates(name):
     return list(dict.fromkeys(out))  # unique, order kept
 
 
-def fetch_vsx(names, pause_s=1.0):
-    """Query VizieR B/vsx for each name (trying VSX spellings); returns queried_name, name, ra, dec, type."""
-    from astroquery.vizier import Vizier
+def fetch_vsx(names, pause_s=1.0, cfg=None):
+    """Query VizieR B/vsx for each name (trying VSX spellings); returns queried_name, name, ra, dec, type.
+    Uses the first VizieR server (main or mirror) that answers."""
+    from .vizier import vizier
 
-    v = Vizier(columns=["Name", "RAJ2000", "DEJ2000", "Type"], row_limit=5)
+    v = vizier(cfg, columns=["Name", "RAJ2000", "DEJ2000", "Type"], row_limit=5)
     rows = []
     for name in names:
         hit = None
@@ -160,9 +161,10 @@ def vsx_rows(cfg, data_stars, fetch=True):
     if len(missing) and fetch and cfg.dataset == "real":
         print(f"Fetching {len(missing)} stars not yet in the labels file from VizieR B/vsx (1 s between requests)")
         try:
-            got = fetch_vsx(list(missing["data_name"]))
-        except ImportError as exc:
-            print(f"WARNING: cannot query VizieR ({exc}); these stars stay without a VSX type")
+            got = fetch_vsx(list(missing["data_name"]), cfg=cfg)
+        except (ImportError, RuntimeError) as exc:  # no astroquery, or no VizieR server reachable right now
+            print(f"WARNING: cannot query VizieR ({exc}); these {len(missing)} stars stay without a VSX type for "
+                  "now and are looked up again on the next run")
             got = pd.DataFrame(columns=["queried_name", "name", "ra", "dec", "type"])
         new = missing.rename(columns={"data_name": "queried_name"})[["auid", "queried_name"]]             .merge(got, on="queried_name", how="inner")[cols]
         if len(new):

@@ -218,15 +218,19 @@ def _summarise_star(s, ep, z, rows):
 
 
 def vsx_richness(cfg, centres, radius_deg):
-    """Number of VSX variables of our label-map types within radius of each field centre."""
+    """Number of VSX variables of our label-map types within radius of each field centre, or None when no
+    VizieR server is reachable (the caller then ranks fields by distance only)."""
     from astropy import units as u
     from astropy.coordinates import SkyCoord
-    from astroquery.vizier import Vizier
-
     from .labels import primary_type
+    from .vizier import vizier
     lm = cfg.load_yaml("label_map")
     wanted = set(lm["anomalous"]) | set(lm["normal"])
-    v = Vizier(columns=["Type"], row_limit=-1)
+    try:
+        v = vizier(cfg, columns=["Type"], row_limit=-1)
+    except RuntimeError as exc:
+        print(f"NOTE: {exc}\nNeighbouring fields are ranked by distance only (no VSX counts).")
+        return None
     out = {}
     for _, c in centres.iterrows():
         try:
@@ -287,10 +291,17 @@ def run_select(cfg):
         print(f"counting VSX variables in the {len(near)} nearest fields (within {z['neighbour_deg']} deg) ...")
         cache = os.path.join(cfg.work_dir, "ztf_field_vsx_counts.csv")   # VSX counts are reused on a re-run
         known = pd.read_csv(cache).set_index("field")["vsx_variables"].to_dict() if os.path.exists(cache) else {}
-        rich = {**known, **vsx_richness(cfg, near[~near["field"].isin(known)], z["field_radius_deg"])}
-        pd.DataFrame({"field": list(rich), "vsx_variables": list(rich.values())}).to_csv(cache, index=False)
-        near["vsx_variables"] = near["field"].map(rich)
-        near = near.sort_values(["vsx_variables", "dist_deg"], ascending=[False, True])
+        todo = near[~near["field"].isin(known)]
+        counted = vsx_richness(cfg, todo, z["field_radius_deg"]) if len(todo) else {}
+        rank_by_vsx = counted is not None
+        rich = {**known, **(counted or {})}
+        if rank_by_vsx:
+            pd.DataFrame({"field": list(rich), "vsx_variables": list(rich.values())}).to_csv(cache, index=False)
+            near["vsx_variables"] = near["field"].map(rich)
+            near = near.sort_values(["vsx_variables", "dist_deg"], ascending=[False, True])
+        else:  # VizieR unreachable: nearest fields first, and the log says so
+            near["vsx_variables"] = np.nan
+            near = near.sort_values("dist_deg")
         rest = idx[idx["filter"].isin(z["filters"]) & ~idx["rel_path"].isin(chosen["rel_path"])]
         for _, f in near.iterrows():
             cand = rest[rest["field"] == f["field"]].sort_values(["ccd", "q", "filter"])
@@ -302,7 +313,8 @@ def run_select(cfg):
             if take:
                 where = ("other tiles of a field that holds our stars" if f["dist_deg"] < 0.01 else
                          f"neighbouring field, {f['dist_deg']:.1f} deg from our stars' fields")
-                why = f"{where}; {int(f['vsx_variables'])} labelled VSX variables within {z['field_radius_deg']} deg"
+                why = (f"{where}; {int(f['vsx_variables'])} labelled VSX variables within {z['field_radius_deg']} deg"
+                       if np.isfinite(f["vsx_variables"]) else f"{where}; ranked by distance (VizieR was unreachable)")
                 chosen = pd.concat([chosen, cand.loc[take].assign(priority=2, reason=why)], ignore_index=True)
     chosen = chosen.sort_values(["priority", "field", "ccd", "q", "filter"])
     chosen.to_csv(os.path.join(out, "ztf_selection.csv"), index=False)
