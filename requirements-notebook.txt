@@ -9,4 +9,5 @@ plotly==5.24.1
 kaleido==0.2.1
 astropy
 astroquery
+scipy                    # Wilcoxon tests in compare; Spearman rho
 requests

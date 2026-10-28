@@ -1,95 +1,84 @@
-# Review 2 checklist: every requirement → exact files
+# Review 2 checklist (v3): every requirement → exact files
 
-All result files are produced **from the real AAVSO data** by the notebook
-(`notebooks/cosmic_colab.ipynb`, one cell per step; `python run.py <step> --data real`). They are
-saved in **`MyDrive/cosmic_roja/outputs/review2/`** and shown inline at the end of the notebook.
-Every graph is a **Plotly** figure saved as `fig_*.png` (slides, via kaleido), `fig_*.html`
-(interactive) and `fig_*.json`; `figure_export_log.csv` records any PNG export failure.
-Nothing in `review2/` comes from synthetic data: synthetic runs write to `synthetic_run/`, and
-the code refuses to write synthetic output to any `review2/` folder.
+All result files are produced **from the real AAVSO and ZTF data** by the notebook (`notebooks/cosmic_colab.ipynb`;
+`python run.py <step> --data real`) and saved under **`MyDrive/cosmic_roja/v3_5GB/`** (`outputs/`, `outputs/figures/`,
+`dashboard_data/`). The notebook's last section, **▶️ RESULTS — start here**, shows all of them and ends with
+`ALL RESULTS SHOWN`. Charts are Plotly (PNG + HTML + JSON); **no bar charts or histograms** (enforced by a test). Old v2
+files are moved to `outputs/retired_v2/` by the `report` step and are not results. Synthetic data never reaches these
+folders: synthetic runs write to `synthetic_run/`.
 
-## Requirement 1 — Preprocessing results on the full dataset (tables and graphs)
+## 1. Data at Big Data scale (Phase 1–2)
 
-| Item | File(s) | Produced by |
+| Item | File(s) | Step |
 |---|---|---|
-| Dataset summary: size in MB, rows, stars, observers, bands, observation types, date range | `dataset_summary.csv` (+ `audit_summary.csv`) | Step 1 `ingest.dataset_summary`, Step 0 `audit` |
-| Rows remaining after each cleaning step (thinning shown as its own step, with % removed) | `preprocess_row_counts.csv`, `fig_preprocessing_funnel.png/.html` | Step 2 `preprocess` |
-| Rows per star after each step | `preprocess_rows_per_star.csv` (Hive `preprocess_star_log`) | Step 2 |
-| Every star: used or not, and exactly why | `star_attrition.csv` | Step 5 `windows` |
-| Partition-pruning comparison | `partition_pruning.csv`, `fig_partition_pruning.png/.html` | Step 1 |
-| Observer-score distribution | `fig_observer_score_hist.png/.html`, `observer_score_summary.csv`, `observer_scores.csv`, `observer_top_bottom10.csv`, `spearman_score_vs_uncertainty.csv` | Step 3 `observer_score` |
-| One light curve before/after normalisation (magnitude axis reversed) | `fig_lightcurve_before_after.png/.html`, `lightcurve_star.csv` | Step 2 |
-| Observations per star; rows per band and type | `fig_obs_per_star.png/.html`, `rows_per_band.csv`, `rows_per_type.csv` | Step 1 |
-| Windows per class and per split | `window_summary.csv`, `window_counts_by_class.csv`, `window_counts_by_split.csv` | Step 5 |
-| Plain-English description of every step | `docs/PREPROCESSING.md` | — |
+| AAVSO ≥ 50 MB (total and after removing repeats) | `audit_summary.csv`, `audit_files.csv`, `audit_stars.csv` | `audit` |
+| ZTF: 117 files, 8.53 GB, 4.1 M light curves, 841 M epochs; 25 of 60 AAVSO stars in ZTF with ≥ 20 unsaturated epochs | `ztf_audit_summary.csv`, `ztf_audit_files.csv`, `ztf_aavso_stars.csv` | `ztf_audit` |
+| ZTF in HDFS + partitioned Hive table (field × filter) | Hive `ztf_lightcurves_raw`; DATA_FLOW stage 05 | `ztf_ingest` |
+| ZTF cleaned, step by step; ≥ 5 GB check; Drive copy | `ztf_clean_steps.csv`, `ztf_clean_size_check.csv`, `data_quality_ztf.csv`; Hive `ztf_lightcurves_clean`; `v3_5GB/clean/` | `ztf_clean` |
+| ZTF labels from VSX (2″; VizieR, else HEASARC `aavsovsx`); AAVSO overlaps excluded | `ztf_label_counts.csv`, `composition_ztf.csv`; Hive `ztf_labels` | `ztf_label` |
+| Class-balanced ZTF windows (≤ 50,000) | `ztf_window_counts.csv`; Hive `ztf_window_features`, `ztf_window_sequences`; `work/ztf_windows_seq.npz` | `ztf_windows` |
+| A_k validated against ZTF (Spearman ρ, n) | `ak_validation_summary.csv`, `ak_vs_ztf_observers.csv`; figure 06 | `akval` |
+| Where the data is at every stage, with measured sizes and times | `DATA_FLOW.txt`, `step_timings.csv`; explained in [DATA_FLOW_EXPLAINED.md](DATA_FLOW_EXPLAINED.md) | `report` |
 
-## Requirement 2 — A novel deep learning model, implemented, trained and evaluated
+## 2. Preprocessing results (tables and charts)
 
 | Item | File(s) |
 |---|---|
-| Model description, equations, why RGA-Net, related work, references | `docs/PROPOSED_MODEL.md` |
-| Implementation (PyTorch) | `src/cosmic/rganet.py` (model, training, ablations) |
-| Training runs: best epoch, time, parameters, learned λ | `rganet_runs.csv`, `rganet_learned_lambda.csv` |
-| Training and validation curves | `rganet_history.csv`, `fig_rganet_training_curves.png/.html` |
-| Ablation: full vs no-gate vs observer-blind | `ablation_table.csv`, `ablation_table_star_level.csv`, `fig_ablation.png/.html` |
-| Predictions (validation and test windows, every seed and variant) | `predictions_rganet.csv` |
-| Trained models | `work/models/rganet_<variant>_seed<seed>.pt` |
-| Distributed inference: Spark applies the trained model to all windows | `src/cosmic/infer.py`; Hive table `window_predictions`; `window_predictions_summary.csv`; `distributed_inference_check.csv` (Spark vs PyTorch) |
+| Raw vs cleaned samples (AAVSO, ZTF) | figure 01 (four tables); `sample_aavso_*.csv`, `sample_ztf_*.csv` |
+| Data quality before vs after (size, rows, nulls, duplicates, flags, bands, stars, observers) | figure 02; `data_quality_aavso.csv`, `data_quality_ztf.csv` |
+| Rows after every cleaning step, AAVSO and ZTF | figure 03 (Sankey); `preprocess_row_counts.csv`, `ztf_clean_steps.csv` |
+| Every star: used or not, and why | `star_attrition.csv` |
+| Partition pruning | `partition_pruning.csv` |
+| Observer reliability A_k | figures 04 (light curve coloured by A_k) and 05 (violin by observation type); `observer_scores.csv`, `ak_summary_by_type.csv`, `spearman_score_vs_uncertainty.csv` |
+| Composition source → class → VSX type | figure 07 (sunburst); `composition_aavso.csv`, `composition_ztf.csv` |
+| Method in plain English | [PREPROCESSING.md](PREPROCESSING.md) |
 
-## Requirement 3 — Comparison with 4 ML algorithms (table and graphs)
-
-| Item | File(s) |
-|---|---|
-| The 4 ML models (Spark MLlib: Gaussian NB, DT, RF, LR) | `src/cosmic/classify.py`; chosen settings + training time in `ml_selected_params.csv`; predictions in `predictions_ml.csv` |
-| Comparison table, all metrics, mean ± std over 5 splits, training time | `comparison_table.csv` (window level), `comparison_table_star_level.csv` |
-| Every per-seed number | `metrics_per_seed.csv` |
-| Grouped metric bars with error bars | `fig_comparison_metrics.png/.html`, `fig_comparison_metrics_star_level.png/.html` |
-| ROC and PR curves, all 5 models, one seed, shared axes | `fig_roc_pr_curves.png/.html` |
-| Confusion-matrix grid, all 5 models | `fig_confusion_matrices.png/.html` |
-| ML with vs without observer features (supplementary) | `ml_observer_features_table.csv` |
-| Written comparison: best per metric, margin, vs seed-to-seed spread | `COMPARISON.md` (generated from the numbers) |
-| Method in plain English | `docs/CLASSIFICATION.md` |
-
-## Requirement 4 — At least 50 MB of real AAVSO data
+## 3. The proposed deep learning model (RGA-Net)
 
 | Item | File(s) |
 |---|---|
-| Size per file and in total; PASS/FAIL against 50 MB, both total and after removing repeated observations | `audit_summary.csv`, `audit_files.csv` |
-| Per star rows, observers, dates, coverage, windows; class balance | `audit_stars.csv`, `audit_class_balance.csv` |
-| Skipped files (bad header) and unmatched VSX types | `audit_skipped_files.csv`, `audit_unmatched_vsx_types.csv` |
+| Model, equations, why RGA-Net, related work | [PROPOSED_MODEL.md](PROPOSED_MODEL.md) |
+| Implementation | `src/cosmic/rganet.py` |
+| ZTF pre-training (hold-out AUPRC, epochs, time) | `rganet_pretraining.csv`; `work/models/pretrained_{full,blind}.pt` |
+| Validation-grid selection (one split's validation stars only) | `rganet_grid.csv` |
+| 4 variants × 10 seeds: best epoch, time, parameters, learned λ | `rganet_runs.csv`, `rganet_history.csv`, `rganet_lambda.csv` |
+| Ablation | figure 12; `ablation_table.csv`, `ablation_paired.csv` |
+| Trained models; Spark applies them to all windows | `work/models/rganet_<variant>_seed<n>.pt`; Hive `window_predictions`; `distributed_inference_check.csv` |
 
-## Requirement 5 — Everything before visualisation complete
+## 4. Comparison with the four ML algorithms (Phase 3)
 
-| Stage | Code | Hive tables / files |
-|---|---|---|
-| 0 Audit | `src/cosmic/audit.py`, `rawfiles.py` | `audit_*.csv` |
-| 1 Ingestion (HDFS, Spark, Parquet, Hive) | `ingest.py`, `labels.py` | `observations_raw`, `observations_flat`, `star_labels` |
-| 2 Preprocessing (Spark SQL) | `preprocess.py` | `obs_clean`, `obs_upper_limits`, `preprocess_log`, `preprocess_star_log` |
-| 3 Observer score (Spark SQL) | `observer_score.py` | `observer_residuals`, `observer_scores` |
-| 4 Per-star features | `features.py` | `star_features` |
-| 5 Windowing (Spark) | `windows.py`, `windowing.py`, `splits.py` | `windows`, `window_features`, `window_sequences`, `splits`; `work/windows_seq.npz` |
-| 6 K-Means (MLlib, supporting) | `cluster.py` | `star_clusters` |
-| 7 ML models (MLlib) | `classify.py` | `ml_predictions` |
-| 8 RGA-Net (PyTorch) | `rganet.py` | `predictions_rganet.csv`, `work/models/*.pt` |
-| 8b Distributed inference (Spark `mapInPandas`) | `infer.py` | `window_predictions` |
-| 9 Comparison | `compare.py`, `evaluation.py` | tables, figures, `COMPARISON.md` |
-| 10 Scalability (YARN, 1/2/4 executors × 3 runs) | `scalability.py` | `scalability.csv`, `scalability_runs.csv`, `fig_scalability.png/.html` |
-| Architecture diagram (Graphviz) | `architecture.py` | `architecture.png/.svg/.dot` (copies in `docs/figures/`) |
+| Item | File(s) |
+|---|---|
+| NB, DT, RF, LR in Spark MLlib; with/without observer features; AAVSO-only vs AAVSO + ZTF chosen on validation | `src/cosmic/classify.py`; `ml_selected_params.csv`; `work/predictions_ml.csv`; Hive `ml_predictions` |
+| MCC (threshold = max validation MCC), ROC-AUC, AUPRC, Cohen's κ, Brier; window and star level; mean ± std over 10 seeds | figure 08; `comparison_table.csv`, `per_seed_metrics.csv`; appendix `metrics_appendix.csv` |
+| Proposed vs prior approaches (classic models **without** observer features only; Fix 1), paired Wilcoxon | figures 09, 10, 13; `prior_vs_proposed_table.csv`, `prior_vs_proposed_paired.csv` |
+| Classic models with observer features (our framework, not prior work) | figure 11; `observer_feature_gain.csv` |
+| Written comparison, generated from saved predictions only | `COMPARISON.md` |
+| Method | [CLASSIFICATION.md](CLASSIFICATION.md) |
 
-Not built yet, by design: Tableau exports, dashboards and final visualisations.
+## 5. Phase 4 deliverables
+
+| Item | File(s) |
+|---|---|
+| 13 figures, each with a generated "Inference:" caption | `outputs/figures/01…13_*.png/.html/.json`; `figure_captions.md`, `figure_captions.json` |
+| One colour/naming config for every chart, table and the dashboard | `config/style.yaml` (copied to `dashboard_data/`) |
+| Dashboard-ready tidy tables + data dictionary | `dashboard_data/*.csv`, `*.parquet`; Hive `dash_*`; `dashboard_data/DATA_DICTIONARY.md` |
+| Scalability (YARN 1/2/4 executors × 3 runs) — table only | `scalability.csv`, `scalability_runs.csv` |
+| Architecture diagram | `architecture.png/.svg/.dot` |
 
 ## The rules, and where each is enforced
 
-| Rule | Where |
+| Rule | Where (code; test) |
 |---|---|
-| Split by star everywhere; no star in two sets | `splits.py` (`star_split`, `check_disjoint`); one `splits.csv` shared by every model; tests `test_star_split_*`, `test_classify_fit_predict_on_windows`, `test_rganet_trains_and_ablations_run` |
-| Nothing tuned on test | ML grids and RGA-Net early stopping use validation PR-AUC; thresholds from `evaluation.choose_threshold` on validation; test `test_threshold_comes_from_validation_only` |
-| Same windows, splits and seeds for every model | `windows.py` builds them once; `classify.py` and `rganet.py` both read them |
-| Synthetic data never in results | `config.py` refuses `review2` for synthetic runs; test `test_synthetic_outputs_never_go_to_review2` |
-| No duplicated, padded or synthetic rows in the dataset | the audit reports repeated rows and the size **after** removing them |
-| Big Data stack does ingestion, preprocessing, windowing, features and the 4 ML models | `ingest.py`, `preprocess.py`, `observer_score.py`, `windows.py`, `classify.py` (Spark, Spark SQL, Hive, MLlib on YARN) |
-| PyTorch only for the deep learning model | `rganet.py` (training); `infer.py` runs the same model inside Spark executors |
-| Plotly only (no Matplotlib/Seaborn) | `plots.py`; test `test_no_matplotlib_or_seaborn_anywhere` |
-
-Smoke-test evidence (notebook section 3): HDFS put/list, YARN ResourceManager up, SparkPi on YARN,
-Hive metastore table create/query, and a PySpark-on-YARN table read back through Hive.
+| Split by star; no star in two sets; 10 splits shared by every model | `splits.py`; `test_star_split_disjoint_stratified_reproducible` |
+| Nothing chosen on test (grids, data setting, early stopping, thresholds) | `classify.py`, `rganet.choose_config`, `evaluation.choose_threshold`; `test_threshold_comes_from_validation_only` |
+| ZTF never in validation/test; no ZTF object near an AAVSO star in training | `classify.fit_predict`, `ztf_spark.match_labels`; `test_leakage_ztf_windows_only_ever_train_the_ml_models`, `test_leakage_ztf_objects_near_aavso_stars_are_flagged_and_match_radius` |
+| Augmentation and input statistics from training windows only | `rganet.fit`, `rganet.train_one`; `test_leakage_rganet_statistics_and_augmentation_use_training_windows_only` |
+| "Prior approach" = classic model without observer features only (Fix 1) | `compare.role`, `compare.prior_vs_proposed`; `test_fix1_prior_approaches_are_classic_models_without_observer_features` |
+| Comparison only from saved predictions | `compare.load_predictions`; `test_compare_end_to_end_on_synthetic_predictions` |
+| Metrics correct | `evaluation.py`; `test_mcc_kappa_brier_by_hand_and_against_sklearn`, `test_metrics_by_hand`, `test_paired_wilcoxon_matches_scipy` |
+| Every chart has a generated caption; missing inputs listed, never faked | `report.py`, `plots.py`; `test_every_chart_has_a_generated_inference_caption`, `test_report_makes_figures_and_captions_from_saved_files_and_retires_v2` |
+| DATA_FLOW from measurements only | `dataflow.py`; `test_data_flow_is_generated_from_recorded_measurements` |
+| Fresh machine: missing tables rebuilt, every path from PROJECT_ROOT | `pipeline.py`, `config.py`; `test_fresh_machine_*`, `test_every_path_derives_from_project_root` |
+| No bar charts/histograms; no v2 results in the notebook; notebook up to date | `test_no_bar_charts_histograms_or_v2_results_anywhere`, `test_notebook_runs_every_step_in_order_and_ends_with_the_results` |
+| Plotly only | `test_no_matplotlib_or_seaborn_anywhere` |

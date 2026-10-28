@@ -69,6 +69,16 @@ def load(cfg):
     return out
 
 
+def record_timing(cfg, step, seconds, mode):
+    """Append one step's measured wall time to outputs/step_timings.csv (the latest run of a step replaces older ones)."""
+    import pandas as pd
+    path = os.path.join(cfg.output_dir, "step_timings.csv")
+    row = pd.DataFrame([dict(step=step, seconds=round(float(seconds), 1), mode=mode,
+                             finished=time.strftime("%Y-%m-%d %H:%M:%S"))])
+    old = pd.read_csv(path) if os.path.exists(path) else row.iloc[:0]
+    pd.concat([old[old["step"] != step], row], ignore_index=True).to_csv(path, index=False)
+
+
 def human(n):
     if n is None:
         return "-"
@@ -127,6 +137,13 @@ def write(cfg):
     lines.append(f"  {'stages measured':<62}{len(recs):>12}")
     lines.append(f"  {'total time of the measured stages':<62}{'':>12}{'':>18}"
                  f"{int(sum(r['seconds'] or 0 for r in recs.values())):>8} s")
+    tpath = os.path.join(cfg.output_dir, "step_timings.csv")
+    if os.path.exists(tpath):
+        import pandas as pd
+        t = pd.read_csv(tpath)
+        lines += ["", "STEP TIMINGS (wall time of each run.py step, measured on the latest run of that step)", ""]
+        lines += [f"  {r.step:<16}{r.seconds:>10.1f} s   {r.mode:<28}{r.finished}" for r in t.itertuples()]
+        lines.append(f"  {'total':<16}{t['seconds'].sum():>10.1f} s")
     path = os.path.join(cfg.output_dir, "DATA_FLOW.txt")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")

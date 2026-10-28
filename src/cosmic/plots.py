@@ -145,8 +145,11 @@ def data_quality(dq):
                    f"{_num(a['size_mb'], 1)} MB, {_int(b.get('nulls', 0))} nulls and "
                    f"{_int(b.get('duplicates', 0))} duplicates before, {_int(a.get('nulls', 0))} and "
                    f"{_int(a.get('duplicates', 0))} after")
-    return fig, ("Inference: " + "; ".join(cap) + ". Every null key and duplicate was removed, so the tables used "
-                 "for training contain only valid, unique observations.")
+    after = dq.groupby("dataset", sort=False).tail(1)
+    left = int(after[[c for c in ("nulls", "duplicates") if c in after]].fillna(0).to_numpy().sum())
+    tail = ("No nulls or duplicates remain after cleaning, so the training tables hold only valid, unique observations."
+            if left == 0 else f"{left:,} nulls/duplicates remain after cleaning (see the table).")
+    return fig, "Inference: " + "; ".join(cap) + ". " + tail
 
 
 # ------------------------------------------------------------------ 3. Sankey of cleaning steps
@@ -234,8 +237,9 @@ def ak_violin(scores):
     med = s.groupby("obs_type")["score"].median()
     cap = (f"Inference: {len(s)} observers with enough overlap were scored (low-overlap observers excluded). "
            + ", ".join(f"{t}: median {med[t]:.2f}" for t in order[:4]) + ". "
-           + (f"{order[0]} observers agree best with their peers and {order[-1]} least, so A_k separates observer "
-              "groups as expected." if len(order) > 1 else "Only one observation type had scored observers."))
+           + (f"{order[0]} observers have the highest median agreement with their peers and {order[-1]} the lowest "
+              f"(difference {med[order[0]] - med[order[-1]]:.2f})." if len(order) > 1
+              else "Only one observation type had scored observers."))
     return fig, cap
 
 
@@ -257,10 +261,16 @@ def ak_validation(per_obs, summ):
     if not enough:
         tail = (f"With only {n} observers overlapping ZTF this is too few to conclude anything; the check is reported "
                 "but not used as evidence.")
-    elif rho is not None and np.isfinite(rho) and rho < 0:
-        tail = "Higher A_k goes with smaller scatter against an independent professional survey, supporting A_k."
+    elif rho is None or not np.isfinite(rho):
+        tail = "ρ could not be computed, so this check is inconclusive."
+    elif rho < 0 and p is not None and np.isfinite(p) and p < 0.05:
+        tail = ("Higher A_k goes with smaller scatter against an independent professional survey (p < 0.05), "
+                "supporting A_k.")
+    elif rho < 0:
+        tail = (f"The sign is the expected one (higher A_k, smaller scatter) but p = {_num(p, 3)} is not below 0.05, so "
+                "this check neither confirms nor contradicts A_k.")
     else:
-        tail = "A_k does not track the scatter against ZTF here, so this check does not support A_k."
+        tail = "A_k does not go with smaller scatter against ZTF here, so this check does not support A_k."
     cap = (f"Inference: {int(summ.get('matched_observations', 0)):,} AAVSO observations were matched to ZTF within "
            f"1 day after removing each star/band offset; ρ = {_num(rho)} over {n} observers (marker size = matched "
            f"points). {tail}")
@@ -405,11 +415,18 @@ def ablation_dots(ab, level, order):
     if "full" not in a.index:
         return fig, "Inference: the full model is missing."
     f = a.loc["full", "mcc_mean"]
-    parts = [f"{a.loc[v, 'display_name']} {a.loc[v, 'mcc_mean'] - f:+.3f}" for v in order if v != "full" and v in a.index]
-    worst = min((v for v in order if v != "full" and v in a.index), key=lambda v: a.loc[v, "mcc_mean"], default=None)
-    return fig, (f"Inference: full RGA-Net MCC is {a.loc['full', 'mcc']}; change when a part is removed: "
-                 + "; ".join(parts) + "." + (f" Removing '{a.loc[worst, 'display_name']}' costs the most. Error bars "
-                                             "are the seed-to-seed standard deviation." if worst else ""))
+    others = [v for v in order if v != "full" and v in a.index]
+    parts = [f"{a.loc[v, 'display_name']} {a.loc[v, 'mcc_mean'] - f:+.3f}" for v in others]
+    below = [v for v in others if a.loc[v, "mcc_mean"] < f]
+    if below:
+        worst = min(below, key=lambda v: a.loc[v, "mcc_mean"])
+        verdict = (f" The largest drop below the full model is for the variant '{a.loc[worst, 'display_name']}' "
+                   f"({a.loc[worst, 'mcc_mean'] - f:+.3f}).")
+    else:
+        verdict = " No ablated variant scores below the full model on mean MCC."
+    return fig, (f"Inference: full RGA-Net MCC is {a.loc['full', 'mcc']}; mean MCC of each ablated variant minus the full "
+                 "model: " + "; ".join(parts) + "." + verdict + " Error bars are the seed-to-seed standard deviation; "
+                 "ablation_paired.csv has the per-seed differences and Wilcoxon p-values.")
 
 
 # ------------------------------------------------------------------ 13. confusion matrices at the median-MCC seed

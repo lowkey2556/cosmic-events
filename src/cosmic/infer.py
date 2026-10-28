@@ -68,7 +68,8 @@ def run(spark, cfg):
     bc = spark.sparkContext.broadcast(blobs)
     t0 = time.time()
     from .windows import SUMMARY  # the hybrid head also needs each window's summary features
-    seq = spark.table(cfg.table("window_sequences")).join(
+    # window_sequences.n_obs (an INT count) would clash with the summary feature n_obs (a DOUBLE): keep the feature
+    seq = spark.table(cfg.table("window_sequences")).drop("n_obs").join(
         spark.table(cfg.table("window_features")).select("window_id", *SUMMARY), "window_id")
     probs = seq.mapInPandas(scorer(bc), schema=OUT_SCHEMA)
     idx = spark.table(cfg.table("window_features")).select("window_id", "auid", "label")

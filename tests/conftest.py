@@ -47,6 +47,7 @@ def spark(tmp_path_factory):
             "sys.meta_path.insert(0, _TorchFirst())\n")
         paths.insert(0, str(boot))
     os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (*paths, os.environ.get("PYTHONPATH")) if p)
+    os.environ["PYSPARK_PYTHON"] = sys.executable  # workers must use the same Python as the driver (e.g. a 3.12 venv)
     from pyspark.sql import SparkSession
     s = (SparkSession.builder.master("local[2]").appName("cosmic-tests")
          .config("spark.sql.shuffle.partitions", "4")

@@ -1,6 +1,7 @@
 # Proposed model: RGA-Net (Reliability-Gated Attention Network)
 
-*(Review 2, "Proposed model" slides. Plain-English source for the slides.)*
+*(Review 2, "Proposed model" slides. Plain-English source for the slides. Results are never typed here: they are
+in `v3_5GB/outputs/` after a run — `COMPARISON.md`, `comparison_table.csv`, `ablation_table.csv`, `rganet_lambda.csv`.)*
 
 ## 1. The problem
 
@@ -90,16 +91,34 @@ the observer's agreement score `A_k`, and the observer's offset.
 5. **Head.** `MLP(z)` (64 → 64 → 1, GELU, dropout 0.2) gives one logit; `sigmoid(logit)` is the
    probability of "anomalous".
 
-74,964 trainable parameters with the default settings: deliberately small, because there are only ~60 stars.
+About 75,000 trainable parameters with the default settings (74,964 for the full model with a 14-band /
+8-type vocabulary; +832 with the hybrid head): deliberately small, because there are only ~60 AAVSO stars.
+**Optional hybrid head** (chosen on validation, see below): the window's 13 summary features (imputed and standardised
+with training-window statistics) are concatenated to `z` before the MLP.
 
-### Training
+### Training (Phase 3)
 
-Class-weighted binary cross-entropy (weight of the anomalous class = negatives / positives in
-the training windows), AdamW (learning rate 0.001, weight decay 0.01), gradient-norm clipping at
-1.0, batches of 64, up to 80 epochs, **early stopping on validation PR-AUC** (patience 12; the
-best epoch's weights are kept), fixed seeds. The 70/15/15 split is **by star**, and the decision
-threshold is chosen on the validation windows. The test windows are used once, for the final
-numbers. The hyperparameters are fixed in `config/settings.yaml`; none was tuned on test.
+1. **Pre-training once on ZTF** (`ztf_windows` → `work/ztf_windows_seq.npz`): up to 50,000 class-balanced windows of
+   labelled ZTF light curves, cut exactly like the AAVSO windows. ZTF is one professional survey, so every token has
+   A = 1 and offset = 0: the gate has nothing to act on, and the pre-trained encoder has **no λ parameters**. No ZTF
+   object within 10″ of any AAVSO star is in this pool (`ztf_label`), so no test star is seen in pre-training. 10 % of
+   the ZTF light curves (by object hash) are held out for early stopping (patience 3, up to 12 epochs). A second encoder
+   without the A_k/offset token features is pre-trained the same way for the observer-blind ablation.
+2. **Validation grid, once:** learning rate {1e-4, 3e-4} × dropout {0.1, 0.3} × hybrid head {no, yes}, each fine-tuned
+   on split seed 1 and judged **only on that split's validation stars** (best validation AUPRC). The chosen setting is
+   used for every variant and every seed (`rganet_grid.csv`).
+3. **Fine-tuning per seed** on the AAVSO training stars: all layers trained, gate active (λ starts at softplus(0) =
+   0.69), input statistics taken from pre-training so the encoder sees inputs on the scale it learned. Class-weighted
+   binary cross-entropy (weight of "anomalous" = negatives / positives in the training windows), AdamW (weight decay
+   0.01), gradient-norm clipping at 1.0, batches of 64, up to 60 epochs, **early stopping on validation AUPRC**
+   (patience 10; the best epoch's weights are kept), fixed seeds.
+4. **Training-only augmentation** (never on validation or test windows; enforced by a test): random observation
+   dropout (10 %), a random time shift of the whole window (±5 days), and magnitude noise ~ N(0, uncertainty) per
+   observation (0.05 mag where none was reported).
+5. **10 star-grouped 70/15/15 splits** (seeds 1–10), the same for every model. Thresholds for MCC and κ are chosen on
+   validation (maximum MCC); the test windows are used once, for the final numbers.
+6. **Resumable:** every finished pre-training, grid point and (variant, seed) run is saved in `work/` and reused if
+   Colab disconnects.
 
 ### Inference at scale (Spark)
 
@@ -110,16 +129,18 @@ same input preparation as in training. The results go to the Hive table `window_
 and the Spark probabilities on the validation/test windows are checked against PyTorch's own
 (`distributed_inference_check.csv`).
 
-### Ablations (identical conditions)
+### Ablations (identical splits, seeds and chosen setting)
 
-| Variant | Gate | A_k and offset as token features |
-|---|---|---|
-| RGA-Net (full) | learned λ (attention and pooling) | yes |
-| RGA-Net, no gate | λ fixed at 0 | yes |
-| RGA-Net, observer-blind | λ fixed at 0 | **no** |
+| Variant | ZTF pre-training | Gate | A_k and offset as token features |
+|---|---|---|---|
+| RGA-Net full (proposed) | yes | learned λ (attention and pooling) | yes |
+| no ZTF pre-training | no (trained from scratch on AAVSO) | learned λ | yes |
+| no gate | yes | λ fixed at 0 | yes |
+| observer-blind | yes (blind encoder) | λ fixed at 0 | **no** |
 
-*Full vs no-gate* isolates the gate itself. *No-gate vs observer-blind* shows whether reliability
-information helps even as a plain input. The learned λ values are reported after training.
+*Full vs no-pretrain* measures what ZTF pre-training adds. *Full vs no-gate* isolates the gate itself. *No-gate vs
+observer-blind* shows whether reliability information helps even as a plain input. Paired per-seed differences and
+Wilcoxon p-values are in `ablation_paired.csv`; learned λ per layer in `rganet_lambda.csv`.
 
 ## 4. Why RGA-Net?
 
@@ -160,7 +181,7 @@ Vaswani et al. (2017); the contribution is the reliability-gated attention modif
 knowledge, among the reviewed literature, no prior work gates attention by a learned
 observer-reliability score. We do not claim that RGA-Net is more
 accurate than other models: the comparison with four ML models on identical splits, and the
-ablation, are reported as measured in `outputs/review2/COMPARISON.md`, including where RGA-Net
+ablation, are reported as measured in `v3_5GB/outputs/COMPARISON.md`, including where RGA-Net
 is not the best.
 
 **A caveat.** A_k is measured within a 1-day window, so stars that change brightness within

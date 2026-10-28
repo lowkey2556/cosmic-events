@@ -59,7 +59,7 @@ def run(spark, cfg):
     t = cfg.table
     tables = {}
     tables["dim_star"] = spark.sql(f"""
-        SELECT l.auid, COALESCE(l.name, l.data_name) AS name, l.type AS vsx_type, l.primary_type,
+        SELECT l.auid, COALESCE(l.name, l.data_name) AS name, l.vsx_type, l.primary_type,
                CAST(l.label AS INT) AS label, l.ra, l.dec, l.sky_region,
                COALESCE(o.n_obs, 0) AS n_obs, COALESCE(o.n_observers, 0) AS n_observers,
                COALESCE(w.windows, 0) AS windows, s.`set` AS set_seed1
@@ -120,5 +120,6 @@ def dictionary(cfg, tables):
     path = os.path.join(cfg.dashboard_dir, "DATA_DICTIONARY.md")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
-    shutil.copy(path, cfg.repo_path(os.path.join("docs", "DATA_DICTIONARY.md")))
+    if cfg.dataset == "real":  # never put synthetic row counts into the repository's docs
+        shutil.copy(path, cfg.repo_path(os.path.join("docs", "DATA_DICTIONARY.md")))
     print(f"saved {path}")
