@@ -7,7 +7,7 @@ excluded) and how many executors YARN actually granted. The table gives mean ± 
 and speedup = mean time at 1 executor / mean time at N executors, plus the machine's CPU
 core count, so the result can be read honestly: on a 2-core Colab VM, more than 2 executors
 cannot run truly in parallel.
-Outputs: scalability_runs.csv (every run), scalability.csv (summary), fig_scalability.png/.html.
+Outputs: scalability_runs.csv (every run), scalability.csv (summary table; no chart).
 
 Why: shows how the Big Data part of the pipeline behaves when YARN gives it more executors.
 """
@@ -18,7 +18,6 @@ import sys
 
 import pandas as pd
 
-from . import plots
 from .config import REPO_ROOT
 
 
@@ -76,5 +75,4 @@ def run(cfg, overrides=()):
     if len(short):
         print("NOTE: YARN granted fewer executors than requested for: "
               + ", ".join(f"{int(r.executors)} (got {int(r.executors_granted_min)})" for r in short.itertuples()))
-    plots.scalability(summ, cores, out)
     return summ

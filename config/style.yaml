@@ -1,0 +1,53 @@
+# One shared colour and naming config for every chart, table and dashboard (report.py, compare.py,
+# dashboard.py and the RESULTS cells all read this file).
+models:
+  # key in the prediction files -> display name, role and colour
+  RGA-Net:
+    name: RGA-Net (proposed)
+    role: proposed
+    color: "#d1495b"
+  NB:
+    name: Gaussian Naive Bayes
+    role: prior approach
+    color: "#2a78d6"
+  DT:
+    name: Decision Tree
+    role: prior approach
+    color: "#1baf7a"
+  RF:
+    name: Random Forest
+    role: prior approach
+    color: "#eda100"
+  LR:
+    name: Logistic Regression
+    role: prior approach
+    color: "#4a3aa7"
+feature_sets:
+  without_observer: without observer features (prior approach)
+  with_observer: with observer features (our framework applied to a classic model)
+variants:
+  full: RGA-Net full (pre-trained + gate)
+  no_pretrain: no ZTF pre-training
+  no_gate: no reliability gate (λ = 0)
+  observer_blind: observer-blind (no A_k, no offsets)
+variant_colors:
+  full: "#d1495b"
+  no_pretrain: "#eda100"
+  no_gate: "#2a78d6"
+  observer_blind: "#7a7a7a"
+sources:
+  AAVSO: "#2a78d6"
+  ZTF: "#1baf7a"
+classes:
+  anomalous: "#d1495b"
+  normal: "#2a78d6"
+  unlabelled: "#b8b7b1"
+obs_types:
+  CCD: "#2a78d6"
+  DSLR: "#1baf7a"
+  Visual: "#eda100"
+  VIS: "#eda100"
+  PEP: "#4a3aa7"
+  other: "#7a7a7a"
+ak_colorscale: Viridis      # A_k colour scale (light curve)
+heatmap_colorscale: Blues   # confusion matrices

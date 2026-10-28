@@ -19,6 +19,12 @@ NEEDS = {
     "cluster": ["star_features"],
     "classify": ["window_features", "splits"],
     "infer": ["window_sequences", "window_features", "splits"],
+    "ztf_ingest": [],
+    "ztf_clean": ["star_labels"],          # ingests the raw ZTF files itself when needed (or restores from Drive)
+    "ztf_label": ["ztf_lightcurves_clean", "star_labels"],
+    "ztf_windows": ["ztf_labels", "obs_clean"],
+    "akval": ["ztf_lightcurves_clean", "star_labels", "obs_clean", "observer_scores"],
+    "dashboard": ["star_labels", "obs_clean", "observer_scores", "window_features", "splits"],
 }
 # tables each Spark step writes
 PRODUCES = {
@@ -30,6 +36,12 @@ PRODUCES = {
     "cluster": ["star_clusters"],
     "classify": ["ml_predictions"],
     "infer": ["window_predictions"],
+    "ztf_ingest": ["ztf_lightcurves_raw"],
+    "ztf_clean": ["ztf_lightcurves_clean"],
+    "ztf_label": ["ztf_labels"],
+    "ztf_windows": ["ztf_window_features", "ztf_window_sequences"],
+    "akval": [],
+    "dashboard": [],
 }
 PRODUCER = {t: step for step, tables in PRODUCES.items() for t in tables}
 

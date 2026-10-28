@@ -42,6 +42,7 @@ BASE_FEATURES = ["amp_robust", "std", "skewness", "kurtosis", "log_ls_period", "
                  "gap_median", "gap_max", "n_obs", "time_span"]
 OBSERVER_FEATURES = ["w_a", "n_observers", "mean_abs_offset"]
 NUM_TOKEN_FEATURES = ["mag_norm", "t_days", "logdt", "unc", "unc_missing", "a_k", "obs_offset"]
+SUMMARY = BASE_FEATURES + OBSERVER_FEATURES  # per-window summary features (also fed to RGA-Net's hybrid head)
 LS_SCHEMA = "window_id STRING, ls_period DOUBLE, ls_power DOUBLE, ls_ok BOOLEAN"
 SEQ_SCHEMA = ("window_id STRING, n_obs INT, seq_len INT, mag_norm ARRAY<FLOAT>, t_days ARRAY<FLOAT>, "
               "logdt ARRAY<FLOAT>, unc ARRAY<FLOAT>, unc_missing ARRAY<FLOAT>, a_k ARRAY<FLOAT>, "
@@ -103,28 +104,43 @@ def vocab(counts, max_n):
 
 
 # ------------------------------------------------------------------ Spark
-def assign_windows(spark, cfg):
-    """Temp view `w_obs`: one row per (observation, window) for windows with >= min_obs observations."""
+def aavso_obs_sql(cfg):
+    """One row per cleaned AAVSO observation with its observer's A_k and offset (the window input)."""
+    return f"""SELECT c.auid, c.jd, c.mag_norm, c.band, c.obs_type, c.observer, c.uncertainty,
+                      COALESCE(s.score, 0.0) AS a_k,
+                      CASE WHEN s.low_n OR s.median_residual IS NULL THEN 0.0 ELSE s.median_residual END AS obs_offset,
+                      COALESCE(s.low_n, true) AS low_n
+               FROM {cfg.table('obs_clean')} c LEFT JOIN {cfg.table('observer_scores')} s ON c.observer = s.observer"""
+
+
+def make_vocab(spark, cfg):
+    """Band and observation-type indices shared by AAVSO and ZTF windows (views w_vb, w_vt). The AAVSO bands come
+    first (most frequent first); the ZTF filters zg, zr, zi get the next indices, so both datasets embed alike."""
     w = cfg.section("windows")
-    L, S, n_min = float(w["length_days"]), float(w["stride_days"]), int(w["min_obs"])
-    if S > L:
-        raise ValueError("windows.stride_days must be <= windows.length_days")
     bands = spark.sql(f"SELECT band AS value, COUNT(*) AS n FROM {cfg.table('obs_clean')} GROUP BY band").toPandas()
     types = spark.sql(f"SELECT obs_type AS value, COUNT(*) AS n FROM {cfg.table('obs_clean')} "
                       "WHERE obs_type IS NOT NULL GROUP BY obs_type").toPandas()
     vb, vt = vocab(bands, int(w["max_bands"])), vocab(types, int(w["max_obs_types"]))
-    spark.createDataFrame(pd.DataFrame({"band": list(vb), "band_idx": list(vb.values())}) if vb else
-                          pd.DataFrame({"band": ["-"], "band_idx": [1]})).createOrReplaceTempView("w_vb")
-    spark.createDataFrame(pd.DataFrame({"obs_type": list(vt), "type_idx": list(vt.values())}) if vt else
-                          pd.DataFrame({"obs_type": ["-"], "type_idx": [1]})).createOrReplaceTempView("w_vt")
+    for z in w.get("ztf_bands", ["zg", "zr", "zi"]):
+        vb.setdefault(z, max(list(vb.values()) + [1]) + 1)
+    vt.setdefault("CCD", max(list(vt.values()) + [1]) + 1)
+    spark.createDataFrame(pd.DataFrame({"band": list(vb), "band_idx": list(vb.values())})).createOrReplaceTempView("w_vb")
+    spark.createDataFrame(pd.DataFrame({"obs_type": list(vt), "type_idx": list(vt.values())})) \
+        .createOrReplaceTempView("w_vt")
+    return vb, vt
+
+
+def assign_windows_from(spark, cfg, obs_sql, out_view="w_obs"):
+    """View out_view: one row per (observation, window) for windows with >= min_obs observations, from any
+    observation source with columns auid, jd, mag_norm, band, obs_type, observer, uncertainty, a_k, obs_offset,
+    low_n (window k of a star covers [t0 + k*stride, t0 + k*stride + length), t0 = its first observation)."""
+    w = cfg.section("windows")
+    L, S, n_min = float(w["length_days"]), float(w["stride_days"]), int(w["min_obs"])
+    if S > L:
+        raise ValueError("windows.stride_days must be <= windows.length_days")
     spark.sql(f"""
         WITH o AS (
-          SELECT c.auid, c.jd, c.mag_norm, c.band, c.obs_type, c.observer, c.uncertainty,
-                 COALESCE(s.score, 0.0) AS a_k,
-                 CASE WHEN s.low_n OR s.median_residual IS NULL THEN 0.0 ELSE s.median_residual END AS obs_offset,
-                 COALESCE(s.low_n, true) AS low_n,
-                 MIN(c.jd) OVER (PARTITION BY c.auid) AS t0
-          FROM {cfg.table('obs_clean')} c LEFT JOIN {cfg.table('observer_scores')} s ON c.observer = s.observer),
+          SELECT x.*, MIN(x.jd) OVER (PARTITION BY x.auid) AS t0 FROM ({obs_sql}) x),
         e AS (
           SELECT o.*, explode(sequence(GREATEST(0, CAST(FLOOR((jd - t0 - {L}) / {S}) AS INT) + 1),
                                        CAST(FLOOR((jd - t0) / {S}) AS INT))) AS k
@@ -137,24 +153,33 @@ def assign_windows(spark, cfg):
         SELECT CONCAT(g.auid, '#', LPAD(CAST(g.k AS STRING), 4, '0')) AS window_id, g.*,
                COALESCE(vb.band_idx, 1) AS band_idx, COALESCE(vt.type_idx, 1) AS type_idx
         FROM g LEFT JOIN w_vb vb ON g.band = vb.band LEFT JOIN w_vt vt ON g.obs_type = vt.obs_type
-        WHERE g.n_in_window >= {n_min}""").cache().createOrReplaceTempView("w_obs")
+        WHERE g.n_in_window >= {n_min}""").cache().createOrReplaceTempView(out_view)
+
+
+def assign_windows(spark, cfg):
+    """AAVSO windows: temp view `w_obs`."""
+    vb, vt = make_vocab(spark, cfg)
+    assign_windows_from(spark, cfg, aavso_obs_sql(cfg), "w_obs")
     return vb, vt
 
 
-def window_features(spark, cfg):
+def window_features(spark, cfg, w_view="w_obs", labels=None):
+    """Per-window summary features (ML input). labels: table/view with auid, label, name, data_name, vsx_type
+    (default: the AAVSO star_labels table)."""
+    labels = labels or cfg.table("star_labels")
     f = cfg.section("features")
     w = cfg.section("windows")
     p = dict(ls_max_points=int(w["ls_max_points"]), ls_seed=int(w["ls_seed"]),
              ls_min_period_days=float(f["ls_min_period_days"]), ls_max_period_days=float(f["ls_max_period_days"]),
              ls_samples_per_peak=int(f["ls_samples_per_peak"]))
-    ls = spark.table("w_obs").select("window_id", "t_days", "mag_norm").groupBy("window_id") \
+    ls = spark.table(w_view).select("window_id", "t_days", "mag_norm").groupBy("window_id") \
         .applyInPandas(lambda d: lomb_scargle_window(d, p), schema=LS_SCHEMA)
-    ls.createOrReplaceTempView("w_ls")
+    ls.createOrReplaceTempView(f"{w_view}_ls")
     return spark.sql(f"""
         WITH g AS (
           SELECT window_id, t_days, mag_norm, observer, a_k,
                  t_days - LAG(t_days) OVER (PARTITION BY window_id ORDER BY t_days) AS gap
-          FROM w_obs),
+          FROM {w_view}),
         agg AS (
           SELECT window_id,
                  percentile(mag_norm, 0.95) - percentile(mag_norm, 0.05) AS amp_robust,
@@ -165,9 +190,9 @@ def window_features(spark, cfg):
           FROM g GROUP BY window_id),
         offs AS (
           SELECT window_id, AVG(ABS(obs_offset)) AS mean_abs_offset
-          FROM (SELECT DISTINCT window_id, observer, obs_offset FROM w_obs WHERE NOT low_n) GROUP BY window_id),
+          FROM (SELECT DISTINCT window_id, observer, obs_offset FROM {w_view} WHERE NOT low_n) GROUP BY window_id),
         idx AS (
-          SELECT DISTINCT window_id, auid, k, t0 + k * {float(w['stride_days'])} AS window_start_jd FROM w_obs)
+          SELECT DISTINCT window_id, auid, k, t0 + k * {float(w['stride_days'])} AS window_start_jd FROM {w_view})
         SELECT idx.window_id, idx.auid, idx.k, idx.window_start_jd, l.label,
                COALESCE(l.name, l.data_name) AS name, l.vsx_type,
                agg.amp_robust, agg.std, agg.skewness, agg.kurtosis,
@@ -176,24 +201,26 @@ def window_features(spark, cfg):
                agg.gap_median, agg.gap_max, agg.n_obs, agg.time_span,
                agg.w_a, agg.n_observers, offs.mean_abs_offset
         FROM idx JOIN agg ON idx.window_id = agg.window_id
-        LEFT JOIN w_ls ls ON idx.window_id = ls.window_id
+        LEFT JOIN {w_view}_ls ls ON idx.window_id = ls.window_id
         LEFT JOIN offs ON idx.window_id = offs.window_id
-        LEFT JOIN {cfg.table('star_labels')} l ON idx.auid = l.auid""")
+        LEFT JOIN {labels} l ON idx.auid = l.auid""")
 
 
-def window_sequences(spark, cfg):
+def window_sequences(spark, cfg, w_view="w_obs"):
     L = int(cfg.section("windows")["seq_len"])
     cols = ["window_id", "t_days", "mag_norm", "uncertainty", "a_k", "obs_offset", "band_idx", "type_idx"]
-    return spark.table("w_obs").select(*cols).groupBy("window_id") \
+    return spark.table(w_view).select(*cols).groupBy("window_id") \
         .applyInPandas(lambda d: build_sequence(d, L), schema=SEQ_SCHEMA)
 
 
-def export_npz(spark, cfg, vb, vt):
-    """window_sequences (+ labels) -> work/windows_seq.npz (float32 arrays, N x L x features)."""
-    seq = spark.sql(f"""SELECT s.*, f.auid, f.label FROM {cfg.table('window_sequences')} s
-                        JOIN {cfg.table('window_features')} f ON s.window_id = f.window_id
+def export_npz(spark, cfg, vb, vt, seq_table="window_sequences", feat_table="window_features",
+               fname="windows_seq.npz"):
+    """Token sequences + labels + per-window summary features -> V3_ROOT/work/<fname> (N x L x features)."""
+    summ = ", ".join(f"f.{c}" for c in BASE_FEATURES + OBSERVER_FEATURES)
+    seq = spark.sql(f"""SELECT s.*, f.auid, f.label, {summ} FROM {cfg.table(seq_table)} s
+                        JOIN {cfg.table(feat_table)} f ON s.window_id = f.window_id
                         ORDER BY s.window_id""").toPandas()
-    path = os.path.join(cfg.work_dir, "windows_seq.npz")
+    path = os.path.join(cfg.work_dir, fname)
     n = save_window_npz(path, seq, int(cfg.section("windows")["seq_len"]))
     with open(os.path.join(cfg.work_dir, "vocab.json"), "w") as fh:
         json.dump(dict(band=vb, obs_type=vt, n_band=len(vb) + 2, n_type=len(vt) + 2), fh, indent=1)
@@ -220,7 +247,10 @@ def save_window_npz(path, seq, L):
                         np.zeros((0, L), np.int64),
                         label=seq["label"].fillna(-1).astype(int).to_numpy(),
                         window_id=fixed_str(seq["window_id"]), auid=fixed_str(seq["auid"]),
-                        feature_names=fixed_str(NUM_TOKEN_FEATURES))
+                        feature_names=fixed_str(NUM_TOKEN_FEATURES),
+                        summary=(seq[SUMMARY].astype(float).to_numpy(np.float32) if all(c in seq for c in SUMMARY)
+                                 else np.full((len(seq), len(SUMMARY)), np.nan, np.float32)),
+                        summary_names=fixed_str(SUMMARY))
     return int(num.shape[0])
 
 
@@ -304,7 +334,28 @@ def run(spark, cfg):
                                  bands_indexed=len(vb), obs_types_indexed=len(vt))])
     print("\n" + summary.T.to_string(header=False))
     save_csv(summary, cfg, "window_summary.csv")
+    # dataset composition (rows of cleaned observations by class and VSX type; input of the sunburst chart)
+    comp = spark.sql(f"""SELECT 'AAVSO' AS source,
+                                CASE l.label WHEN 1 THEN 'anomalous' WHEN 0 THEN 'normal' ELSE 'unlabelled' END AS class,
+                                COALESCE(l.primary_type, 'unknown') AS vsx_type, COUNT(*) AS rows,
+                                COUNT(DISTINCT c.auid) AS stars
+                         FROM {cfg.table('obs_clean')} c LEFT JOIN {cfg.table('star_labels')} l ON c.auid = l.auid
+                         GROUP BY 1, 2, 3 ORDER BY rows DESC""").toPandas()
+    save_csv(comp, cfg, "composition_aavso.csv")
     if w.get("export_for_pytorch", True):
-        export_npz(spark, cfg, vb, vt)
+        path = export_npz(spark, cfg, vb, vt)
+
+        from . import dataflow
+        from .spark_session import table_bytes
+        dataflow.record(cfg, "aavso_windows", "Spark cuts every star's cleaned light curve into 100-day windows "
+                        "(stride 50 d, >= 20 observations), computes 13 summary features per window (Spark SQL + "
+                        "Lomb-Scargle in applyInPandas) and the token sequences for RGA-Net; exported to .npz.",
+                        f"Hive {cfg.table('window_features')}, {cfg.table('window_sequences')}, "
+                        f"{cfg.table('splits')}; {path}", "Parquet (Hive) + NumPy .npz", "Spark SQL / applyInPandas",
+                        size_bytes=table_bytes(spark, cfg.table("window_features"))
+                        + table_bytes(spark, cfg.table("window_sequences")), rows=len(idx),
+                        changes=f"{len(idx):,} windows from {idx['auid'].nunique()} stars; {len(labelled)} labelled "
+                                f"stars in {len(sp['seeds'])} star-grouped splits",
+                        extra={"npz file": f"{path} ({os.path.getsize(path) / 2**20:.1f} MB)"})
     spark.catalog.dropTempView("w_obs")
     return summary

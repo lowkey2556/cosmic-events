@@ -17,7 +17,6 @@ from pyspark.ml.clustering import KMeans
 from pyspark.ml.evaluation import ClusteringEvaluator
 from pyspark.ml.feature import Imputer, StandardScaler, VectorAssembler
 
-from . import plots
 from .features import BASELINE
 from .spark_session import save_csv, save_hive_table
 
@@ -43,7 +42,6 @@ def run(spark, cfg):
     sil["chosen"] = sil["k"] == best_k
     print(sil.to_string(index=False))
     save_csv(sil, cfg, "kmeans_silhouette.csv")
-    plots.silhouette(sil, best_k, cfg.output_dir)
 
     out = models[best_k].transform(X).selectExpr(
         "auid", "name", "vsx_type", "primary_type", "label", "cluster",

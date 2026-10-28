@@ -30,7 +30,6 @@ import pandas as pd
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.stat import Correlation
 
-from . import plots
 from .spark_session import save_csv, save_hive_table
 
 
@@ -138,10 +137,51 @@ def run(spark, cfg):
                                  "observers with >= min_residuals and at least one reported uncertainty")])
     print(sp.to_string(index=False))
     save_csv(sp, cfg, "spearman_score_vs_uncertainty.csv")
-    plots.score_histogram(pdf, cfg.output_dir)
+    samples(spark, cfg)
+    from . import dataflow
+    from .spark_session import table_bytes
+    dataflow.record(cfg, "ak_scores", "Spark SQL self-join: every observation is compared with the median of OTHER "
+                    "observers of the same star and band within 1 day; each observer's robust scatter becomes A_k.",
+                    f"Hive tables {cfg.table('observer_residuals')}, {cfg.table('observer_scores')}",
+                    "Parquet (Hive tables)", "Spark SQL on YARN",
+                    size_bytes=table_bytes(spark, cfg.table("observer_scores")) +
+                    table_bytes(spark, cfg.table("observer_residuals")), rows=len(pdf),
+                    changes=f"{n_res:,} observations got a consensus residual; {len(pdf)} observers scored "
+                            f"({int((~pdf['low_n']).sum())} with enough overlap)",
+                    seconds=None)
     if cfg.dataset == "synthetic":
         print("SANITY CHECK:", sanity_check(pdf))
     return pdf
+
+
+def samples(spark, cfg, n=10, max_curve=20000):
+    """One star (most observers, several bands): 10 raw rows with every original column, the same observations
+    cleaned with their derived columns, and the star's whole cleaned light curve with A_k (for the charts)."""
+    t, raw, sc = cfg.table("obs_clean"), cfg.table("observations_raw"), cfg.table("observer_scores")
+    auid = spark.sql(f"""SELECT auid FROM {t} GROUP BY auid
+                         ORDER BY COUNT(DISTINCT band) > 1 DESC, COUNT(DISTINCT observer) DESC, auid LIMIT 1""").first()
+    if auid is None:
+        return
+    auid = auid[0]
+    clean = spark.sql(f"""SELECT c.jd, c.band, c.obs_type, c.observer, c.mag, c.uncertainty, c.band_median, c.mag_norm,
+                                 ROUND(s.score, 3) AS A_k,
+                                 ROUND(CASE WHEN s.low_n THEN NULL ELSE s.median_residual END, 3) AS offset_mag
+                          FROM {t} c JOIN {sc} s ON c.observer = s.observer
+                          WHERE c.auid = '{auid}' ORDER BY c.jd LIMIT {n}""").toPandas()
+    keys = " OR ".join(f"(jd = {r.jd!r} AND band = '{r.band}' AND observer = '{r.observer}')" for r in clean.itertuples())
+    rawr = spark.sql(f"""SELECT row_num AS `#`, target, auid, jd, mag, uncertainty, fainterthan, band,
+                                obs_type AS type, observer, airmass, transformed, comp1_c, cmag, comp2_k, kmag, chart,
+                                commentcode, comments
+                         FROM {raw} WHERE auid = '{auid}' AND ({keys or 'false'}) ORDER BY jd LIMIT {n}""").toPandas()
+    save_csv(rawr, cfg, "sample_aavso_raw.csv")
+    save_csv(clean.assign(auid=auid), cfg, "sample_aavso_clean.csv")
+    curve = spark.sql(f"""SELECT c.jd, c.mag, c.mag_norm, c.band, c.obs_type, c.observer, s.score AS A_k
+                          FROM {t} c JOIN {sc} s ON c.observer = s.observer WHERE c.auid = '{auid}'""")
+    k = curve.count()
+    if k > max_curve:
+        curve = curve.sample(fraction=max_curve / k, seed=1)
+    name = spark.sql(f"SELECT COALESCE(name, data_name) FROM {cfg.table('star_labels')} WHERE auid = '{auid}'").first()
+    save_csv(curve.toPandas().assign(auid=auid, name=name[0] if name else auid), cfg, "lightcurve_ak_sample.csv")
 
 
 def sanity_check(pdf, noisy="NOISY", offset="OFFST"):

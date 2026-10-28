@@ -25,7 +25,6 @@ import re
 import pandas as pd
 from pyspark.sql import types as T
 
-from . import plots
 from .labels import build_labels
 from .rawfiles import RAW_COLUMNS, discover
 from .spark_session import hdfs, save_csv
@@ -140,8 +139,6 @@ def partition_pruning_test(spark, cfg):
     pdf["bytes_vs_flat"] = pdf["bytes_read"] / pdf.loc[pdf["table"] == "observations_flat", "bytes_read"].iloc[0]
     print(pdf.to_string(index=False))
     save_csv(pdf, cfg, "partition_pruning.csv")
-    plots.pruning(pdf.assign(table=pdf["table"].map({"observations_raw": "partitioned",
-                                                      "observations_flat": "unpartitioned"})), cfg.output_dir)
     return pdf
 
 
@@ -191,13 +188,19 @@ def dataset_summary(spark, cfg):
         FROM {t} o LEFT JOIN {cfg.table('star_labels')} l ON o.auid = l.auid
         GROUP BY o.auid, COALESCE(l.name, l.data_name), l.vsx_type, l.label ORDER BY n DESC""").toPandas()
     save_csv(per_star, cfg, "obs_per_star.csv")
-    plots.bar_obs_per_star(per_star, cfg.output_dir)
     return s
 
 
 def run(spark, cfg):
+    import time
+
+    from . import dataflow
+    from .rawfiles import list_csv_files
+    from .spark_session import path_bytes, table_bytes, table_files
+    t0 = time.time()
     base = cfg.hdfs_base
     raw_paths = put_raw_files(cfg)  # header-checked files only
+    t_put = time.time()
     build_labels(spark, cfg, raw_paths)
 
     read_raw(spark, raw_paths).createOrReplaceTempView("raw_csv")
@@ -233,4 +236,27 @@ def run(spark, cfg):
     save_csv(parts, cfg, "hive_partitions.csv")
 
     partition_pruning_test(spark, cfg)
-    return dataset_summary(spark, cfg)
+    summary = dataset_summary(spark, cfg)
+    files = list_csv_files(cfg.data_dir)
+    rows = int(summary["total_rows"].iloc[0])
+    csv_bytes = sum(os.path.getsize(f) for f in files)
+    hdfs_raw = path_bytes(spark, cfg.hdfs_uri(f"{base}/raw"))
+    pq_bytes = table_bytes(spark, cfg.table("observations_raw"))
+    dataflow.record(cfg, "aavso_source", "AAVSO observations downloaded by hand from the AAVSO website as CSV files "
+                    "and kept, read only, in Google Drive.", cfg.data_dir, "CSV (one header row, 19 columns)",
+                    "AAVSO website download (manual)", size_bytes=csv_bytes, rows=rows, files=len(files),
+                    changes="(source)")
+    dataflow.record(cfg, "aavso_hdfs_raw", "The header-checked CSVs are copied from the Drive mount into HDFS with "
+                    "`hdfs dfs -put` (HDFS keeps its blocks on the Colab machine's local disk).",
+                    f"HDFS {cfg.hdfs_uri(base + '/raw')}", "CSV", "Hadoop HDFS (hdfs dfs -put)", size_bytes=hdfs_raw,
+                    rows=rows, files=len(raw_paths), changes="none (byte-for-byte copy of the accepted files)",
+                    seconds=t_put - t0)
+    dataflow.record(cfg, "aavso_hive_raw", "Spark reads the CSVs with an explicit schema, adds obs_year and "
+                    "sky_region, and writes Snappy Parquet partitioned by obs_year/sky_region; Hive registers it "
+                    "as an external table.", f"Hive table {cfg.table('observations_raw')} at {base}/warehouse",
+                    "Parquet (Snappy), partitioned", "Spark + Hive metastore", size_bytes=pq_bytes, rows=rows,
+                    files=table_files(spark, cfg.table("observations_raw")),
+                    compression=f"CSV {csv_bytes / 2**20:.1f} MB -> Parquet {pq_bytes / 2**20:.1f} MB "
+                                f"({csv_bytes / max(pq_bytes, 1):.1f}x smaller)",
+                    changes="columns typed; obs_year, sky_region and source_file added", seconds=time.time() - t_put)
+    return summary

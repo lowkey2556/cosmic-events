@@ -14,55 +14,69 @@ What it does, in order (row counts are logged after every step into the Hive tab
      A few CCD observers take hundreds of points of one star in one night; without the cap
      they would supply most of the rows and dominate every statistic, every window and the
      observer scores. Thinning keeps their night but removes the repetition.
-  6. Band-normalise: mag_norm = mag − median(mag) for each (auid, band), dropping
-     (auid, band) groups that are too small for a stable median.
+  6. Band-normalise: mag_norm = mag − median(mag) for each (auid, band). (auid, band) groups
+     with fewer than preprocess.min_group_size rows (20) are dropped, EXCEPT a star's main bands
+     (V, Visual, CV, B; preprocess.main_bands), which are kept with at least
+     preprocess.min_main_band_rows rows (5), so a star is not lost because its minor bands are small.
 Rows are also counted PER STAR after every step (Hive table `preprocess_star_log`), so any
 star that disappears can be traced to the exact step that removed it.
-Outputs: Hive tables `obs_clean`, `obs_upper_limits`, `preprocess_log`, `preprocess_star_log`,
-the row-count table and chart (each step with the % it removed), and one star's light
-curve before/after normalisation.
+Rows AND stars are counted after every step (preprocess_row_counts.csv: the input of the Sankey chart).
+Outputs: Hive tables `obs_clean`, `obs_upper_limits`, `preprocess_log`, `preprocess_star_log`;
+data_quality_aavso.csv (size, rows, nulls, duplicates, flagged rows, bands, stars, observers, before
+and after cleaning); a Parquet copy of obs_clean in V3_ROOT/clean/; the data-flow records.
 
 Why: crowdsourced data contain duplicates, gaps and flagged-bad reports. Different
 filters (V, B, visual) sit at different magnitude levels, so comparing observers or
 computing amplitudes requires putting every band on a common zero point first.
 """
+import os
+import time
+
 import pandas as pd
 
-from . import plots
-from .spark_session import save_csv, save_hive_table
+from . import dataflow
+from .spark_session import path_bytes, save_csv, save_hive_table, table_bytes, table_files
 
 
 def _count(spark, view):
     return spark.sql(f"SELECT COUNT(*) FROM {view}").first()[0]
 
 
+def _stars(spark, view):
+    return spark.sql(f"SELECT COUNT(DISTINCT auid) FROM {view} WHERE auid IS NOT NULL").first()[0]
+
+
+def _step(spark, name, view):
+    return (name, _count(spark, view), _stars(spark, view))
+
+
 def transform(spark, source_view, settings):
     """Pure Spark SQL pipeline on a view of typed observations. Returns (clean_df, upper_df, log_pdf)."""
     p = settings["preprocess"]
     codes = "".join(c.upper() for c in p["unreliable_comment_codes"])
-    log = [("0 raw rows", _count(spark, source_view))]
+    log = [_step(spark, "0 raw rows", source_view)]
 
     spark.sql(f"""
         SELECT * FROM (
           SELECT *, ROW_NUMBER() OVER (PARTITION BY auid, jd, band, observer, mag
                                        ORDER BY source_file, row_num) AS dup_rank
           FROM {source_view}) WHERE dup_rank = 1""").drop("dup_rank").createOrReplaceTempView("pp_dedup")
-    log.append(("1 after deduplication", _count(spark, "pp_dedup")))
+    log.append(_step(spark, "1 after deduplication", "pp_dedup"))
 
     spark.sql("""SELECT * FROM pp_dedup
                  WHERE auid IS NOT NULL AND jd IS NOT NULL AND band IS NOT NULL AND band <> ''
                    AND observer IS NOT NULL AND observer <> '' AND mag IS NOT NULL""") \
         .createOrReplaceTempView("pp_keys")
-    log.append(("2 after dropping null keys", _count(spark, "pp_keys")))
+    log.append(_step(spark, "2 after dropping null keys", "pp_keys"))
 
     spark.sql(f"""SELECT * FROM pp_keys
                   WHERE commentcode IS NULL OR NOT (commentcode RLIKE '[{codes}]')""") \
         .createOrReplaceTempView("pp_codes")
-    log.append((f"3 after dropping comment codes {codes}", _count(spark, "pp_codes")))
+    log.append(_step(spark, f"3 after dropping comment codes {codes}", "pp_codes"))
 
     upper = spark.sql("SELECT * FROM pp_codes WHERE fainterthan")
     spark.sql("SELECT * FROM pp_codes WHERE NOT fainterthan").createOrReplaceTempView("pp_det")
-    log.append(("4 detections (fainter-than split out)", _count(spark, "pp_det")))
+    log.append(_step(spark, "4 detections (fainter-than split out)", "pp_det"))
     n_upper = upper.count()
 
     m = int(p.get("max_obs_per_observer_night") or 0)
@@ -75,12 +89,14 @@ def transform(spark, source_view, settings):
               FROM pp_det)
             WHERE n_night <= {m} OR (rn - 1) % CAST(CEIL(n_night / {m}) AS INT) = 0""") \
             .drop("rn", "n_night").createOrReplaceTempView("pp_thin")
-        log.append((f"5 after thinning dense time series (<= {m} per observer per night)", _count(spark, "pp_thin")))
+        log.append(_step(spark, f"5 after thinning dense time series (<= {m} per observer per night)", "pp_thin"))
     else:
         spark.table("pp_det").createOrReplaceTempView("pp_thin")
-        log.append(("5 thinning switched off", _count(spark, "pp_thin")))
+        log.append(_step(spark, "5 thinning switched off", "pp_thin"))
 
     min_n = int(p["min_group_size"])
+    main = ", ".join("'" + b.replace("'", "''") + "'" for b in p.get("main_bands") or []) or "''"
+    min_main = int(p.get("min_main_band_rows", min_n))
     clean = spark.sql(f"""
         SELECT monotonically_increasing_id() AS obs_id, auid, target, jd, mag, uncertainty, band, obs_type,
                observer, commentcode, obs_year, sky_region,
@@ -88,7 +104,7 @@ def transform(spark, source_view, settings):
         FROM (SELECT *, percentile(mag, 0.5) OVER (PARTITION BY auid, band) AS grp_median,
                         COUNT(*) OVER (PARTITION BY auid, band) AS grp_n
               FROM pp_thin)
-        WHERE grp_n >= {min_n}""")
+        WHERE grp_n >= {min_n} OR (band IN ({main}) AND grp_n >= {min_main})""")
     return clean, upper, log, n_upper
 
 
@@ -108,48 +124,67 @@ def star_counts(spark, clean_view, source_view="pp_source"):
     return out
 
 
+def quality(spark, view, key_cols, codes):
+    """Rows, nulls in key fields, exact duplicates, flagged rows, bands, stars and observers of a view."""
+    nul = " OR ".join(f"{c} IS NULL" for c in key_cols)
+    r = spark.sql(f"""SELECT COUNT(*) AS rows, SUM(CASE WHEN {nul} THEN 1 ELSE 0 END) AS nulls,
+                             SUM(CASE WHEN commentcode RLIKE '[{codes}]' THEN 1 ELSE 0 END) AS flagged,
+                             COUNT(DISTINCT band) AS bands, COUNT(DISTINCT auid) AS stars,
+                             COUNT(DISTINCT observer) AS observers FROM {view}""").first().asDict()
+    distinct = spark.sql(f"SELECT COUNT(*) FROM (SELECT DISTINCT {', '.join(key_cols)} FROM {view})").first()[0]
+    r["duplicates"] = r["rows"] - distinct
+    return r
+
+
 def run(spark, cfg):
+    t0 = time.time()
+    p = cfg.section("preprocess")
+    codes = "".join(c.upper() for c in p["unreliable_comment_codes"])
     spark.table(cfg.table("observations_raw")).createOrReplaceTempView("pp_source")
     clean, upper, log, n_upper = transform(spark, "pp_source", cfg.settings)
     save_hive_table(clean, cfg, "obs_clean")
     save_hive_table(upper, cfg, "obs_upper_limits")
-    n_clean = spark.table(cfg.table("obs_clean")).count()
-    log.append((f"6 after band normalisation (groups >= {cfg.section('preprocess')['min_group_size']})", n_clean))
+    t_clean = cfg.table("obs_clean")
+    log.append(_step(spark, f"6 after band normalisation (groups >= {p['min_group_size']}; main bands >= "
+                            f"{p.get('min_main_band_rows', p['min_group_size'])})", t_clean))
 
-    stars = star_counts(spark, cfg.table("obs_clean"))
+    stars = star_counts(spark, t_clean)
     save_hive_table(spark.createDataFrame(stars), cfg, "preprocess_star_log")
     save_csv(stars, cfg, "preprocess_rows_per_star.csv")
 
-    pdf = pd.DataFrame(log, columns=["step", "rows"])
+    pdf = pd.DataFrame(log, columns=["step", "rows", "stars"])
     pdf["removed"] = (pdf["rows"].shift(1) - pdf["rows"]).fillna(0).astype(int)
+    pdf["stars_removed"] = (pdf["stars"].shift(1) - pdf["stars"]).fillna(0).astype(int)
     pdf["pct_removed_by_step"] = (100 * pdf["removed"] / pdf["rows"].shift(1)).fillna(0).round(2)
     pdf["pct_of_raw"] = (100 * pdf["rows"] / pdf["rows"].iloc[0]).round(2)
-    pdf.loc[len(pdf)] = ["(side table) fainter-than upper limits kept for cadence", n_upper, 0, 0.0,
-                         round(100 * n_upper / pdf["rows"].iloc[0], 2)]
     print(pdf.to_string(index=False))
+    print(f"Stars before cleaning: {int(pdf['stars'].iloc[0])}; after: {int(pdf['stars'].iloc[-1])}. "
+          f"Fainter-than upper limits kept separately for cadence: {n_upper}")
     save_hive_table(spark.createDataFrame(pdf), cfg, "preprocess_log")
     save_csv(pdf, cfg, "preprocess_row_counts.csv")
-    plots.funnel(pdf.iloc[:-1], cfg.output_dir)
-    lightcurve_figure(spark, cfg)
+
+    # data quality before vs after (key fields as in deduplication)
+    keys = ["auid", "jd", "band", "observer", "mag"]
+    raw_bytes = path_bytes(spark, cfg.hdfs_uri(f"{cfg.hdfs_base}/raw"))
+    before = quality(spark, "pp_source", keys, codes)
+    after = quality(spark, t_clean, keys, codes)
+    clean_bytes = table_bytes(spark, t_clean)
+    dq = pd.DataFrame([dict(dataset="AAVSO", stage="before cleaning (raw CSV in HDFS)", size_bytes=raw_bytes, **before),
+                       dict(dataset="AAVSO", stage="after cleaning (obs_clean, Parquet)", size_bytes=clean_bytes, **after)])
+    dq["size_mb"] = (dq["size_bytes"] / 1024 ** 2).round(2)
+    dq = dq[["dataset", "stage", "size_mb", "size_bytes", "rows", "nulls", "duplicates", "flagged", "bands", "stars",
+             "observers"]]
+    print(dq.to_string(index=False))
+    save_csv(dq, cfg, "data_quality_aavso.csv")
+
+    # a Parquet copy of the cleaned table in Drive (V3_ROOT/clean) for resuming and for study
+    copy = os.path.join(cfg.clean_dir, "aavso_obs_clean.parquet")
+    spark.table(t_clean).toPandas().to_parquet(copy, index=False)
+    print(f"saved {copy}")
+    dataflow.record(cfg, "aavso_clean", "Spark SQL removes repeated reports, rows with missing keys, flagged comment "
+                    "codes and fainter-than limits, thins dense CCD nights and normalises every band to its median.",
+                    f"Hive table {t_clean} (HDFS) + Drive {copy}", "Parquet (Snappy)", "Spark SQL on YARN",
+                    size_bytes=clean_bytes, rows=after["rows"], files=table_files(spark, t_clean),
+                    changes=f"{before['rows'] - after['rows']:,} rows removed ({before['stars']} -> {after['stars']} "
+                            f"stars); columns added: obs_id, band_median, mag_norm", seconds=time.time() - t0)
     return pdf
-
-
-def lightcurve_figure(spark, cfg):
-    p = cfg.section("plots")
-    t = cfg.table("obs_clean")
-    auid = p["lightcurve_star"]
-    if auid is None:  # star with the most distinct observers, preferring multi-band stars
-        auid = spark.sql(f"""SELECT auid FROM {t} GROUP BY auid
-                             ORDER BY COUNT(DISTINCT band) > 1 DESC, COUNT(DISTINCT observer) DESC, auid
-                             LIMIT 1""").first()[0]
-    name = spark.sql(f"SELECT COALESCE(name, data_name) FROM {cfg.table('star_labels')} WHERE auid = '{auid}'").first()
-    name = name[0] if name else auid
-    one = spark.sql(f"SELECT jd, mag, mag_norm, band, observer FROM {t} WHERE auid = '{auid}'")
-    n = one.count()
-    if n > 50000:  # plotting only: keep the figure readable
-        one = one.sample(fraction=50000 / n, seed=1)
-    pdf = one.toPandas()
-    top = list(pdf["observer"].value_counts().index[: p["lightcurve_top_observers"]])
-    save_csv(pd.DataFrame({"auid": [auid], "name": [name], "rows_plotted": [len(pdf)], "rows_total": [n]}),
-             cfg, "lightcurve_star.csv")
-    plots.lightcurve_before_after(pdf, f"{name} ({auid})", top, cfg.output_dir)

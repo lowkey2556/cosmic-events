@@ -14,14 +14,21 @@ Steps, in pipeline order:
     preprocess     Step 2   Spark SQL cleaning, thinning, band normalisation (+ rows per star after every step)
     score          Step 3   observer agreement scores
     features       Step 4   per-star features (used by K-Means)
+    ztf_ingest     Phase 2  ZTF files -> HDFS (field=/filter= folders) + partitioned Hive table ztf_lightcurves_raw
+    ztf_clean      Phase 2  Spark cleaning of the ZTF epoch arrays -> ztf_lightcurves_clean (+ 5 GB check, Drive copy)
+    ztf_label      Phase 2  VSX cross-match (2") of ZTF objects; objects near AAVSO stars excluded -> ztf_labels
     windows        Step 5   Spark windowing: per-window ML features, RGA-Net token sequences, star-grouped splits
+    ztf_windows    Phase 2  the same windows for labelled ZTF light curves (A_k = 1), class-balanced, <= 50,000
+    akval          Phase 2  A_k validated against ZTF (Spearman rho, n)
     cluster        Step 6   K-Means on the per-star features (supporting analysis)
-    classify       Step 7   the 4 ML models (Spark MLlib) on the windows
-    rganet         Step 8   RGA-Net + ablations (PyTorch, GPU if available; no Spark); saves the models
+    classify       Step 7   the 4 ML models (Spark MLlib), with/without observer features, AAVSO or AAVSO+ZTF
+    rganet         Step 8   RGA-Net: ZTF pre-training, validation grid, fine-tuning, 4 variants x 10 seeds (PyTorch)
     infer          Step 8b  distributed inference: Spark applies the trained RGA-Net to ALL windows
-    compare        Step 9   comparison tables, Plotly figures, COMPARISON.md (no Spark)
+    compare        Step 9   comparison tables, Fix 1 tables, COMPARISON.md - from saved predictions only (no Spark)
+    dashboard      Step 10b tidy dashboard tables (CSV + Parquet + Hive) and DATA_DICTIONARY.md
+    report         Step 11  the 13 result figures + generated captions + DATA_FLOW.txt (no Spark)
     scalability    Step 10  preprocessing + windowing through YARN at 1, 2, 4 executors, 3 runs each
-    all                     audit .. compare in order (not the ZTF steps, not scalability)
+    all                     the whole pipeline in order (not the Phase 1 download steps, not scalability)
 
 Fresh machines: before a Spark step runs, any Hive table it needs that is missing is rebuilt by running
 the step that makes it first (src/cosmic/pipeline.py). Spark steps run in the Python 3.12 environment
@@ -44,11 +51,12 @@ sys.stdout.reconfigure(line_buffering=True)  # show progress live in Colab "!pyt
 
 from cosmic.config import check_paths, load_config  # noqa: E402
 
-SPARK_STEPS = ["ingest", "preprocess", "score", "features", "windows", "cluster", "classify", "infer"]
+SPARK_STEPS = ["ingest", "preprocess", "score", "features", "windows", "cluster", "classify", "infer",
+               "ztf_ingest", "ztf_clean", "ztf_label", "ztf_windows", "akval", "dashboard"]
 LOCAL_STEPS = ["paths", "audit", "ztf_select", "ztf_download", "ztf_audit", "candidates", "architecture",
-               "rganet", "compare", "scalability"]
-ALL = ["audit", "architecture", "ingest", "preprocess", "score", "features", "windows", "cluster", "classify",
-       "rganet", "infer", "compare"]
+               "rganet", "compare", "report", "scalability"]
+ALL = ["audit", "architecture", "ingest", "preprocess", "score", "ztf_clean", "ztf_label", "windows", "ztf_windows",
+       "akval", "classify", "rganet", "infer", "compare", "dashboard", "report"]
 SPARK_PY = "/content/cosmic_py/bin/python"
 
 
@@ -80,6 +88,9 @@ def run_local(step, cfg, overrides):
     elif step == "compare":
         from cosmic import compare
         compare.run(cfg)
+    elif step == "report":
+        from cosmic import report
+        report.run(cfg)
     elif step == "scalability":
         from cosmic import scalability
         scalability.run(cfg, overrides)
@@ -115,11 +126,17 @@ def run_spark(steps, cfg, args):
         if res.returncode:
             raise SystemExit(res.returncode)
         return
-    from cosmic import classify, cluster, features, infer, ingest, observer_score, preprocess, windows
+    from types import SimpleNamespace
+
+    from cosmic import (classify, cluster, dashboard, features, infer, ingest, observer_score, preprocess, windows,
+                        ztf_spark)
     from cosmic.pipeline import plan_steps
     from cosmic.spark_session import get_spark
     mods = dict(ingest=ingest, preprocess=preprocess, score=observer_score, features=features, windows=windows,
-                cluster=cluster, classify=classify, infer=infer)
+                cluster=cluster, classify=classify, infer=infer, dashboard=dashboard,
+                ztf_ingest=SimpleNamespace(run=ztf_spark.ingest_run), ztf_clean=SimpleNamespace(run=ztf_spark.clean_run),
+                ztf_label=SimpleNamespace(run=ztf_spark.label_run), ztf_windows=SimpleNamespace(run=ztf_spark.windows_run),
+                akval=SimpleNamespace(run=ztf_spark.akval_run))
     wall0 = time.time()
     spark = get_spark(cfg)
     sc = spark.sparkContext

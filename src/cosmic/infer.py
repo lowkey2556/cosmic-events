@@ -67,7 +67,9 @@ def run(spark, cfg):
     print(f"Broadcasting {len(blobs)} trained models to the executors: {sorted(blobs)}")
     bc = spark.sparkContext.broadcast(blobs)
     t0 = time.time()
-    seq = spark.table(cfg.table("window_sequences"))
+    from .windows import SUMMARY  # the hybrid head also needs each window's summary features
+    seq = spark.table(cfg.table("window_sequences")).join(
+        spark.table(cfg.table("window_features")).select("window_id", *SUMMARY), "window_id")
     probs = seq.mapInPandas(scorer(bc), schema=OUT_SCHEMA)
     idx = spark.table(cfg.table("window_features")).select("window_id", "auid", "label")
     splits = spark.table(cfg.table("splits")).select("seed", "auid", "set")
@@ -85,6 +87,12 @@ def run(spark, cfg):
           f"in {secs:.1f} s -> Hive table {cfg.table('window_predictions')}")
     print(summary.to_string(index=False))
     save_csv(summary, cfg, "window_predictions_summary.csv")
+    from . import dataflow
+    from .spark_session import table_bytes
+    dataflow.record(cfg, "predictions_hive", "Spark broadcasts the trained models and scores every window with "
+                    "mapInPandas; the probabilities are written back to Hive.", f"Hive {cfg.table('window_predictions')}",
+                    "Parquet (Hive table)", "Spark mapInPandas + PyTorch (CPU)",
+                    size_bytes=table_bytes(spark, cfg.table("window_predictions")), rows=n, seconds=secs)
 
     check_path = os.path.join(cfg.work_dir, "predictions_rganet.csv")
     if os.path.exists(check_path):

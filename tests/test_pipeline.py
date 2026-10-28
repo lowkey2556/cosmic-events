@@ -188,7 +188,9 @@ def test_comment_with_line_break_stays_one_record(spark, tmp_path):
 # ---------------------------------------------------------------- preprocessing
 def test_preprocessing_counts_and_normalisation(spark, clean_views, typed_view):
     log = clean_views["log"]
-    rows = [n for _, n in log]
+    rows = [n for _, n, _ in log]
+    stars = [k for _, _, k in log]
+    assert all(a >= b for a, b in zip(stars, stars[1:])) and stars[0] > 0
     assert all(a >= b for a, b in zip(rows, rows[1:])), log
     assert rows[1] < rows[0]                       # duplicates were removed
     assert clean_views["n_upper"] > 0              # fainter-than rows split out

@@ -33,6 +33,7 @@ paths:
   dashboard_subdir: dashboard_data             # tidy tables for the Review 3 dashboard
   star_list: config/stars.yaml
   label_map: config/label_map.yaml
+  style: config/style.yaml
 
 hdfs:
   namenode: hdfs://localhost:9000
@@ -71,6 +72,28 @@ ztf:
   max_neighbour_fields: 25                     # ...at most this many, nearest first (one VSX count query each)
   field_radius_deg: 3.5                        # VSX variables counted within this radius of a field centre
   tmp_dir: null                                # null = /content/ztf_tmp on Colab (local disk, before copying to Drive)
+  # Phase 2: cleaning, labels and windows (Spark)
+  min_clean_epochs: 20                         # light curves with fewer good epochs after cleaning are dropped
+  clean_target_gb: 5                           # cleaned ZTF Parquet on disk is checked against this
+  copy_clean_to_drive: true                    # keep a copy of the cleaned Parquet in V3_ROOT/clean (fast restore)
+  label_match_arcsec: 2.0                      # ZTF object <-> VSX variable cross-match radius
+  aavso_exclusion_arcsec: 10.0                 # ZTF objects this close to ANY AAVSO star never enter the training pool
+  field_query_radius_deg: 5.3                  # VSX queried within this radius of each field centre (covers the field)
+  max_lightcurves_per_class: 8000              # labelled ZTF light curves windowed per class (hash sample, all fields)
+  pretrain_windows: 50000                      # class-balanced cap on ZTF windows for pre-training
+  ml_ztf_windows: 10000                        # class-balanced ZTF windows added in the ML "AAVSO + ZTF" setting
+  sample_seed: 7
+
+# A_k validated against ZTF (Spark): AAVSO observations matched to unsaturated ZTF points of the same star.
+akval:
+  window_days: 1.0                             # an AAVSO observation is matched to the nearest ZTF point within this
+  min_points_per_observer: 10                  # observers with fewer matched points are not scored against ZTF
+  min_observers: 10                            # fewer scored observers than this -> "too small to conclude"
+
+# VSX look-ups: VizieR (main server, then its mirrors) first; NASA HEASARC's copy of VSX (table aavsovsx,
+# through astroquery) when no VizieR server answers. Both are queried with astroquery; AAVSO is never scraped.
+vsx:
+  backends: [vizier, heasarc]
 
 # VizieR (for VSX): tried in this order; the first server that answers a quick test query is used.
 vizier:
@@ -103,12 +126,17 @@ windows:
   ls_seed: 7
   export_for_pytorch: true                     # write work/windows_seq.npz for RGA-Net (off in scalability runs)
 
-# Star-grouped splits, shared by every model (same 5 splits for RGA-Net and the 4 ML models).
+# Star-grouped splits, shared by every model (the same 10 AAVSO splits for RGA-Net and the 4 ML models).
 split:
   train: 0.70
   val: 0.15                                    # test = the rest (0.15)
-  seeds: [1, 2, 3, 4, 5]                       # one different split per seed
-  curves_seed: 1                               # the seed used for ROC/PR curves and confusion matrices
+  seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]       # one different split per seed
+
+# Metrics (positive class = anomalous). MCC is the main metric; the MCC/kappa threshold is chosen on the
+# validation set (maximising MCC), separately at window level and at star level.
+metrics:
+  main: mcc
+  main_level: window                           # headline level; star level is reported too
 
 preprocess:
   # AAVSO comment codes that mark an observation as unreliable (any letter present -> dropped).
@@ -118,7 +146,11 @@ preprocess:
   # spaced in time, so a few CCD observers taking hundreds of points per night cannot dominate.
   # null or 0 switches thinning off. See docs/PREPROCESSING.md.
   max_obs_per_observer_night: 10
-  min_group_size: 20                           # (star, band) groups smaller than this are dropped
+  min_group_size: 20                           # (star, band) groups smaller than this are dropped, EXCEPT...
+  # ...a star's main bands, which are kept if they have at least min_main_band_rows rows, so stars are not
+  # lost because their minor bands are small (V, Visual, CV = unfiltered with V zero point, B):
+  main_bands: [Johnson V, Visual, Unfiltered with V Zeropoint, Johnson B]
+  min_main_band_rows: 5
 
 observer_score:
   window_days: 1.0                             # Δt for the leave-one-out consensus
@@ -133,14 +165,16 @@ features:
   ls_max_points: 20000                         # random subsample cap per star (fixed seed) to bound cost
   ls_seed: 7
 
-# The 4 ML models (Spark MLlib) on per-window summary features. Grids are tuned on the VALIDATION
-# stars only (best validation PR-AUC); the decision threshold is chosen on validation (best F1).
+# The 4 ML models (Spark MLlib) on per-window summary features. Each model is trained in two data settings
+# (AAVSO train only; AAVSO train + ZTF windows), with and without observer features. The data setting and
+# the grid setting are chosen on the VALIDATION windows only (best validation AUPRC).
 classify:
-  dt_max_depth: [3, 5, 8]
-  dt_min_instances: [1, 10]
+  data_settings: [aavso, aavso_ztf]
+  dt_max_depth: [5, 8]
+  dt_min_instances: [5]
   rf_num_trees: [100]
-  rf_max_depth: [5, 10]
-  lr_reg_param: [0.001, 0.01, 0.1]
+  rf_max_depth: [8]
+  lr_reg_param: [0.01, 0.1]
   lr_elastic_net: [0.0]
   lr_max_iter: 200
 
@@ -162,10 +196,26 @@ rganet:
   lr: 0.001
   weight_decay: 0.01
   batch_size: 64
-  max_epochs: 80
-  patience: 12                                 # early stopping on validation PR-AUC
+  max_epochs: 60                               # fine-tuning on AAVSO
+  patience: 10                                 # early stopping on validation AUPRC
   grad_clip: 1.0
-  variants: [full, no_gate, observer_blind]
+  # 1. pre-training once on the ZTF windows (gate inactive: A = 1 everywhere)
+  pretrain_epochs: 12
+  pretrain_lr: 0.001
+  pretrain_batch_size: 128
+  pretrain_patience: 3                         # on a 10 % hold-out of ZTF light curves (by object)
+  # 2. fine-tuning per seed on the AAVSO train split, all layers, gate active; small grid chosen on validation
+  grid_seed: 1                                 # the grid is evaluated on this split's validation set only
+  grid:
+    lr: [0.0001, 0.0003]
+    dropout: [0.1, 0.3]
+    hybrid_head: [false, true]                 # window summary features concatenated before the MLP head
+  augment:                                     # training windows only
+    obs_dropout: 0.1                           # random fraction of observations removed
+    time_shift_days: 5.0                       # all times shifted by a uniform random amount in +-this
+    mag_noise_scale: 1.0                       # magnitude noise ~ N(0, scale * uncertainty)
+    default_uncertainty: 0.05                  # for observations without a reported uncertainty (mag)
+  variants: [full, no_pretrain, no_gate, observer_blind]
 
 # Distributed inference (Spark): which trained RGA-Net variants are applied to all windows.
 infer:

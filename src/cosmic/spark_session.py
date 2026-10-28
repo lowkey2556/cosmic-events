@@ -94,3 +94,30 @@ def save_csv(pdf, cfg, filename):
     pdf.to_csv(path, index=False)
     print(f"saved {path}")
     return path
+
+
+def path_bytes(spark, uri):
+    """Total size in bytes of a file or folder on any Hadoop file system (hdfs://, file://)."""
+    jvm = spark._jvm
+    path = jvm.org.apache.hadoop.fs.Path(uri)
+    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+    return int(fs.getContentSummary(path).getLength()) if fs.exists(path) else 0
+
+
+def table_location(spark, table):
+    rows = spark.sql(f"DESCRIBE FORMATTED {table}").collect()
+    for r in rows:
+        if (r["col_name"] or "").strip() == "Location":
+            return r["data_type"].strip()
+    return None
+
+
+def table_bytes(spark, table):
+    """On-disk size of a Hive table's data (its HDFS location)."""
+    loc = table_location(spark, table)
+    return path_bytes(spark, loc) if loc else 0
+
+
+def table_files(spark, table):
+    """Number of data files of a Hive table (partitions included)."""
+    return len(spark.table(table).inputFiles())

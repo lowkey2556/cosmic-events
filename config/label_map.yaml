@@ -7,4 +7,4 @@ normal:    [M, SRA, SRB, SR, EA, EB, EW, DPV, RRAB, RRC, DCEP, CEP, DSCT, SXPHE,
 # printed and saved to unmatched_vsx_types.csv so nothing is dropped silently.
 # Separators that end the primary type. VSX writes combined types with any of these
 # (UGSS+E, SRB:, ZAND|SR, RRAB/BL, NL/VY -> UGSS, SRB, ZAND, RRAB, NL).
-type_separators: [":", "+", "|", "/"]
+type_separators: [":", "+", "|", "/", "!"]           # HEASARC's VSX copy writes combined types with "!"

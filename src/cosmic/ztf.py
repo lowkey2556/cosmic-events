@@ -219,29 +219,25 @@ def _summarise_star(s, ep, z, rows):
 
 def vsx_richness(cfg, centres, radius_deg):
     """Number of VSX variables of our label-map types within radius of each field centre, or None when no
-    VizieR server is reachable (the caller then ranks fields by distance only)."""
-    from astropy import units as u
-    from astropy.coordinates import SkyCoord
+    VSX backend is reachable (the caller then ranks fields by distance only)."""
+    from . import vsx
     from .labels import primary_type
-    from .vizier import vizier
     lm = cfg.load_yaml("label_map")
     wanted = set(lm["anomalous"]) | set(lm["normal"])
     try:
-        v = vizier(cfg, columns=["Type"], row_limit=-1)
+        vsx.backend(cfg)
     except RuntimeError as exc:
         print(f"NOTE: {exc}\nNeighbouring fields are ranked by distance only (no VSX counts).")
         return None
     out = {}
     for _, c in centres.iterrows():
         try:
-            res = v.query_region(SkyCoord(c["ra"] * u.deg, c["dec"] * u.deg), radius=radius_deg * u.deg,
-                                 catalog="B/vsx/vsx")
-            types = [primary_type(t, lm.get("type_separators")) for t in res[0]["Type"]] if len(res) else []
+            res = vsx.cone(cfg, c["ra"], c["dec"], radius_deg, types=sorted(wanted))
+            types = [primary_type(t, lm.get("type_separators")) for t in res["type"]]
             out[int(c["field"])] = int(sum(t in wanted for t in types))
         except Exception as exc:  # noqa: BLE001 - reported; field ranked last
-            print(f"  VizieR count failed for field {int(c['field'])}: {exc}")
+            print(f"  VSX count failed for field {int(c['field'])}: {exc}")
             out[int(c["field"])] = 0
-        time.sleep(1.0)
     return out
 
 

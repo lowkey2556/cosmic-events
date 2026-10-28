@@ -97,28 +97,28 @@ def vsx_name_candidates(name):
 
 
 def fetch_vsx(names, pause_s=1.0, cfg=None):
-    """Query VizieR B/vsx for each name (trying VSX spellings); returns queried_name, name, ra, dec, type.
-    Uses the first VizieR server (main or mirror) that answers."""
-    from .vizier import vizier
+    """Look each name up in VSX (trying VSX spellings); returns queried_name, name, ra, dec, type.
+    Uses VizieR (or a mirror) when it answers, otherwise HEASARC's copy of VSX (vsx.py)."""
+    from . import vsx
 
-    v = vizier(cfg, columns=["Name", "RAJ2000", "DEJ2000", "Type"], row_limit=5)
+    vsx.backend(cfg)  # raises RuntimeError if no backend answers (the caller reports it)
     rows = []
     for name in names:
         hit = None
         for cand in vsx_name_candidates(name):
             try:
-                res = v.query_constraints(catalog="B/vsx/vsx", Name=f"={cand}")
+                res = vsx.by_name(cfg, cand)
             except Exception as exc:  # network errors are reported, not hidden
-                print(f"  VizieR query failed for {cand!r}: {exc}")
+                print(f"  VSX query failed for {cand!r}: {exc}")
                 res = None
             time.sleep(pause_s)
-            if res and len(res[0]):
-                hit = res[0][0]
+            if res is not None and len(res):
+                hit = res.iloc[0]
                 break
         if hit is not None:
-            rows.append(dict(queried_name=name, name=str(hit["Name"]), ra=float(hit["RAJ2000"]),
-                             dec=float(hit["DEJ2000"]), type=str(hit["Type"])))
-            print(f"  {name:12s} -> {hit['Name']:12s} {hit['Type']}")
+            rows.append(dict(queried_name=name, name=str(hit["name"]), ra=float(hit["ra"]),
+                             dec=float(hit["dec"]), type=str(hit["type"])))
+            print(f"  {name:12s} -> {hit['name']:12s} {hit['type']}")
         else:
             print(f"  {name:12s} -> NOT FOUND in VSX (tried {vsx_name_candidates(name)})")
     return pd.DataFrame(rows, columns=["queried_name", "name", "ra", "dec", "type"])

@@ -1,4 +1,4 @@
-"""Plotly figures for the report (no Matplotlib anywhere in the project).
+"""Plotly figures for the report (no Matplotlib anywhere in the project, and no bar charts or histograms).
 
 What it does: one function per figure. Every function takes a SMALL pandas table that
 Spark (or PyTorch) has already produced, builds a Plotly figure and saves it three ways in
@@ -79,220 +79,371 @@ def save(fig, out_dir, name, width=1600, height=900):
     return base + ".png"
 
 
-def bar_obs_per_star(pdf, out_dir):
-    """pdf: columns name, label_name, n — observations per star, coloured by label."""
-    pdf = pdf.sort_values("n", ascending=False)
-    colours = {"anomalous": SERIES[1], "normal": SERIES[0], "unlabelled": OTHER}
+def _style():
+    from .style import load
+    return load()
+
+
+def _num(x, d=3):
+    return "n/a" if x is None or (isinstance(x, float) and not np.isfinite(x)) else f"{x:,.{d}f}"
+
+
+def _int(x):
+    return f"{int(x):,}"
+
+
+# ------------------------------------------------------------------ tables as figures (screenshot-friendly)
+def table_figure(df, title, col_widths=None, highlight_col=None):
+    """A Plotly table (no bars): header row in the theme colour, alternating row shading."""
+    df = df.copy()
+    n = len(df)
+    fill = [["#f6f6f3" if i % 2 else "white" for i in range(n)] for _ in df.columns]
+    if highlight_col is not None and highlight_col in df.columns:
+        j = list(df.columns).index(highlight_col)
+        fill[j] = ["#fdecee"] * n
+    fig = go.Figure(go.Table(
+        columnwidth=col_widths,
+        header=dict(values=[f"<b>{c}</b>" for c in df.columns], fill_color="#123e73", font=dict(color="white", size=15),
+                    align="left", height=34),
+        cells=dict(values=[df[c].astype(str).tolist() for c in df.columns], fill_color=fill, align="left",
+                   font=dict(size=14, color=INK), height=30)))
+    fig.update_layout(title=title, margin=dict(l=20, r=20, t=80, b=20))
+    return fig
+
+
+def caption_samples(raw, clean, dataset):
+    added = [c for c in clean.columns if c not in raw.columns]
+    return (f"Inference: the same {dataset} observations before and after cleaning ({len(raw)} raw rows shown, "
+            f"{len(raw.columns)} raw columns). Cleaning keeps {len(clean.columns)} columns and adds "
+            f"{', '.join(added[:6]) if added else 'no new columns'}; raw-only columns are dropped once they have "
+            "been used for filtering.")
+
+
+def data_quality(dq):
+    """dq: rows dataset, stage, size_mb, rows, nulls, duplicates, flagged, bands, stars, observers
+    (AAVSO, ZTF and a combined pair). Returns (figure, caption): a before/after table with the change in %."""
+    cols = ["size_mb", "rows", "nulls", "duplicates", "flagged", "bands", "stars", "observers"]
+    out = []
+    for ds, g in dq.groupby("dataset", sort=False):
+        b, a = g.iloc[0], g.iloc[-1]
+        for c in cols:
+            if c not in g:
+                continue
+            bv, av = float(b.get(c, np.nan)), float(a.get(c, np.nan))
+            ch = (av - bv) / bv * 100 if bv else np.nan
+            out.append(dict(Dataset=ds, Measure=c.replace("_", " ").replace("size mb", "size (MB)"),
+                            Before=_num(bv, 2) if c == "size_mb" else _int(bv) if np.isfinite(bv) else "n/a",
+                            After=_num(av, 2) if c == "size_mb" else _int(av) if np.isfinite(av) else "n/a",
+                            Change="n/a" if not np.isfinite(ch) else f"{ch:+.1f} %"))
+    t = pd.DataFrame(out)
+    fig = table_figure(t, "Data quality before vs after cleaning (AAVSO, ZTF, combined)", highlight_col="Change")
+    cap = []
+    for ds, g in dq.groupby("dataset", sort=False):
+        b, a = g.iloc[0], g.iloc[-1]
+        cap.append(f"{ds}: {_int(b['rows'])} -> {_int(a['rows'])} rows "
+                   f"({(1 - a['rows'] / b['rows']) * 100:.1f} % removed), {_num(b['size_mb'], 1)} -> "
+                   f"{_num(a['size_mb'], 1)} MB, {_int(b.get('nulls', 0))} nulls and "
+                   f"{_int(b.get('duplicates', 0))} duplicates before, {_int(a.get('nulls', 0))} and "
+                   f"{_int(a.get('duplicates', 0))} after")
+    return fig, ("Inference: " + "; ".join(cap) + ". Every null key and duplicate was removed, so the tables used "
+                 "for training contain only valid, unique observations.")
+
+
+# ------------------------------------------------------------------ 3. Sankey of cleaning steps
+def cleaning_sankey(steps_by_ds):
+    """steps_by_ds: {dataset: DataFrame(step, rows)} in order (first row = raw). Kept rows flow left to right; what
+    each step removes branches off to a grey 'removed by ...' node."""
+    labels, src, dst, val, colors, ncol = [], [], [], [], [], []
+    st = _style()
+
+    def node(name, color):
+        labels.append(name)
+        ncol.append(color)
+        return len(labels) - 1
+
+    caps = []
+    for ds, d in steps_by_ds.items():
+        d = d.reset_index(drop=True)
+        base = st["sources"].get(ds, SERIES[0])
+        prev = node(f"{ds} raw: {_int(d.loc[0, 'rows'])}", base)
+        biggest = (None, 0)
+        for i in range(1, len(d)):
+            rows, removed = int(d.loc[i, "rows"]), int(d.loc[i - 1, "rows"] - d.loc[i, "rows"])
+            name = str(d.loc[i, "step"]).lstrip("0123456789 ")
+            cur = node(f"{ds}: {name} ({_int(rows)})", base)
+            src.append(prev); dst.append(cur); val.append(rows); colors.append("rgba(42,120,214,0.30)"
+                                                                               if ds == "AAVSO" else "rgba(27,175,122,0.30)")
+            if removed > 0:
+                r = node(f"removed: {name} ({_int(removed)})", OTHER)
+                src.append(prev); dst.append(r); val.append(removed); colors.append("rgba(184,183,177,0.55)")
+                if removed > biggest[1]:
+                    biggest = (name, removed)
+            prev = cur
+        kept = d["rows"].iloc[-1] / d["rows"].iloc[0] * 100
+        caps.append(f"{ds} keeps {kept:.1f} % of its raw rows; the largest removal is '{biggest[0]}' "
+                    f"({_int(biggest[1])} rows)")
+    fig = go.Figure(go.Sankey(arrangement="snap", node=dict(label=labels, color=ncol, pad=14, thickness=16),
+                              link=dict(source=src, target=dst, value=val, color=colors)))
+    fig.update_layout(title="Cleaning steps: rows kept (coloured) and removed (grey) at each step")
+    return fig, "Inference: " + "; ".join(caps) + ". Link widths are row counts, so each grey branch is exactly " \
+                                                  "what one cleaning rule removed."
+
+
+# ------------------------------------------------------------------ 4. light curve coloured by A_k
+def lightcurve_ak(d, star):
+    """d: jd, mag, band, observer, A_k (one star). Magnitude axis reversed (brighter = up)."""
+    st = _style()
     fig = go.Figure()
-    for k, c in colours.items():
-        d = pdf[pdf["label_name"] == k]
-        fig.add_bar(x=d["name"], y=d["n"], name=k, marker_color=c)
-    fig.update_xaxes(categoryorder="array", categoryarray=list(pdf["name"]), tickangle=-90, tickfont=dict(size=13))
-    fig.update_yaxes(type="log", title="Observations (log scale)")
-    fig.update_layout(title="Observations per star", barmode="overlay", bargap=0.2,
-                      legend=dict(orientation="h", x=1, xanchor="right", y=1.06))
-    return save(fig, out_dir, "fig_obs_per_star", height=800)
+    symbols = ["circle", "diamond", "square", "triangle-up", "x", "star"]
+    for i, (band, g) in enumerate(d.groupby("band")):
+        fig.add_trace(go.Scattergl(
+            x=g["jd"], y=g["mag"], mode="markers", name=str(band),
+            marker=dict(size=6, symbol=symbols[i % len(symbols)], color=g["A_k"], cmin=0, cmax=1,
+                        colorscale=st.get("ak_colorscale", "Viridis"), showscale=i == 0, opacity=0.8,
+                        colorbar=dict(title="A_k", x=1.02)),
+            customdata=g[["observer", "A_k"]], hovertemplate="JD %{x:.3f}<br>mag %{y:.3f}<br>observer %{customdata[0]}"
+                                                               "<br>A_k %{customdata[1]:.3f}<extra></extra>"))
+    fig.update_yaxes(autorange="reversed", title="Magnitude (mag; brighter = up)")
+    fig.update_xaxes(title="Julian Date (days)")
+    fig.update_layout(title=f"Light curve of {star}, each observation coloured by its observer's A_k",
+                      legend=dict(title="Band", x=1.12))
+    low = d.groupby("observer")["A_k"].first()
+    share = float((d["A_k"] < 0.5).mean() * 100)
+    cap = (f"Inference: {_int(len(d))} cleaned observations of {star} from {d['observer'].nunique()} observers in "
+           f"{d['band'].nunique()} band(s); observer A_k ranges {low.min():.2f}-{low.max():.2f} (median "
+           f"{low.median():.2f}). {share:.1f} % of the points come from observers with A_k below 0.5; these are the "
+           "observations the reliability gate can give less attention.")
+    return fig, cap
 
 
-def funnel(pdf, out_dir):
-    """pdf: columns step, rows (ordered), optional pct_removed_by_step — rows remaining after each step.
-    The thinning step is drawn in a second colour so it stands out as its own step."""
-    pct = pdf["pct_removed_by_step"] if "pct_removed_by_step" in pdf else pd.Series([0.0] * len(pdf))
-    text = [f"{v:,}" + (f"  (−{p:.1f}%)" if i and p > 0 else "") for i, (v, p) in enumerate(zip(pdf["rows"], pct))]
-    colours = [SERIES[1] if "thinning" in s else SERIES[0] for s in pdf["step"]]
-    fig = go.Figure(go.Bar(x=pdf["rows"], y=pdf["step"], orientation="h", marker_color=colours,
-                           text=text, textposition="outside", cliponaxis=False))
-    fig.update_yaxes(autorange="reversed", showgrid=False, automargin=True)
-    fig.update_xaxes(title="Rows remaining (in brackets: % removed by that step)",
-                     range=[0, pdf["rows"].max() * 1.35], showgrid=True)
-    fig.update_layout(title="Preprocessing: rows after each step")
-    return save(fig, out_dir, "fig_preprocessing_funnel", height=max(550, 80 * len(pdf) + 220))
-
-
-def pruning(pdf, out_dir):
-    """pdf: columns table, files_read, bytes_read."""
-    fig = make_subplots(rows=1, cols=2, subplot_titles=("Files scanned", "MB scanned"), horizontal_spacing=0.15)
-    cols = [SERIES[0], OTHER]
-    fig.add_bar(x=pdf["table"], y=pdf["files_read"], marker_color=cols, text=pdf["files_read"].astype(int),
-                textposition="outside", cliponaxis=False, row=1, col=1)
-    mb = pdf["bytes_read"] / 1e6
-    fig.add_bar(x=pdf["table"], y=mb, marker_color=cols, text=[f"{v:,.2f}" for v in mb],
-                textposition="outside", cliponaxis=False, row=1, col=2)
-    fig.update_layout(title="Partition pruning: the same year-restricted query", showlegend=False)
-    return save(fig, out_dir, "fig_partition_pruning", width=1400, height=750)
-
-
-def lightcurve_before_after(pdf, star_name, top_observers, out_dir):
-    """pdf: one star's rows: jd, mag, mag_norm, band, observer. Magnitude axes reversed (brighter = up)."""
-    colours = {o: SERIES[i] for i, o in enumerate(sorted(top_observers)[:len(SERIES)])}
-    fig = make_subplots(rows=1, cols=2, shared_xaxes=True, horizontal_spacing=0.09,
-                        subplot_titles=("Before: raw magnitude (all bands)",
-                                        "After: band-normalised (mag − median per band)"))
-    groups = [("other observers", pdf[~pdf["observer"].isin(colours)], OTHER, 5)] + \
-             [(o, pdf[pdf["observer"] == o], c, 7) for o, c in colours.items()]
-    for col, ycol in ((1, "mag"), (2, "mag_norm")):
-        for label, d, c, size in groups:
-            fig.add_trace(go.Scatter(x=d["jd"] - 2400000, y=d[ycol], mode="markers", name=label, legendgroup=label,
-                                     showlegend=col == 1, marker=dict(color=c, size=size, opacity=0.85),
-                                     customdata=d[["band", "observer"]],
-                                     hovertemplate="JD−2400000 %{x:.3f}<br>%{y:.3f} mag<br>%{customdata[0]}"
-                                                   "<br>observer %{customdata[1]}<extra></extra>"),
-                          row=1, col=col)
-        fig.update_yaxes(autorange="reversed", row=1, col=col)
-    fig.update_xaxes(title="JD − 2400000", tickformat="d")
-    fig.update_yaxes(title="Magnitude (brighter ↑)", row=1, col=1)
-    fig.update_yaxes(title="Normalised magnitude (brighter ↑)", row=1, col=2)
-    fig.update_layout(title=f"Light curve of {star_name}, coloured by observer",
-                      legend=dict(title="Observer", x=1.01, y=0.5, yanchor="middle"))
-    return save(fig, out_dir, "fig_lightcurve_before_after", width=1800, height=800)
-
-
-def score_histogram(pdf, out_dir):
-    """pdf: observer, score, obs_type (dominant), low_n."""
-    types = [t for t in ["Visual", "CCD", "DSLR"] if t in set(pdf["obs_type"])]
-    groups = [(t, pdf.loc[pdf["obs_type"] == t, "score"], SERIES[i]) for i, t in enumerate(types)]
-    rest = pdf.loc[~pdf["obs_type"].isin(types), "score"]
-    if len(rest):
-        groups.append(("other", rest, OTHER))
+# ------------------------------------------------------------------ 5. violin of A_k by observation type
+def ak_violin(scores):
+    """scores: observer, obs_type, score, low_n (one row per observer). Only measured A_k (not low_n)."""
+    st = _style()
+    s = scores[~scores["low_n"].astype(bool)].copy()
+    order = s.groupby("obs_type")["score"].median().sort_values(ascending=False).index
     fig = go.Figure()
-    for label, s, c in groups:
-        fig.add_trace(go.Histogram(x=s, name=label, marker=dict(color=c, line=dict(color="white", width=1)),
-                                   xbins=dict(start=0, end=1.0001, size=0.04)))
-    fig.update_layout(barmode="stack", legend=dict(title="Dominant observation type"),
-                      title=f"Observer agreement scores (n = {len(pdf)} observers; low-n observers set to the median)")
-    fig.update_xaxes(title="Observer agreement score A_k (1 = agrees perfectly with peers)", range=[0, 1])
-    fig.update_yaxes(title="Observers", rangemode="tozero", tickformat="d")
-    return save(fig, out_dir, "fig_observer_score_hist")
+    for t in order:
+        g = s[s["obs_type"] == t]
+        fig.add_trace(go.Violin(y=g["score"], name=f"{t} (n = {len(g)})", box_visible=True, meanline_visible=True,
+                                points="all" if len(g) < 200 else "outliers", pointpos=0, jitter=0.3,
+                                line_color=st["obs_types"].get(t, st["obs_types"]["other"])))
+    fig.update_yaxes(title="A_k (agreement score, 0-1)", range=[0, 1.05])
+    fig.update_xaxes(title="Observation type (observer's most common)")
+    fig.update_layout(title="Observer agreement score A_k by observation type", showlegend=False)
+    med = s.groupby("obs_type")["score"].median()
+    cap = (f"Inference: {len(s)} observers with enough overlap were scored (low-overlap observers excluded). "
+           + ", ".join(f"{t}: median {med[t]:.2f}" for t in order[:4]) + ". "
+           + (f"{order[0]} observers agree best with their peers and {order[-1]} least, so A_k separates observer "
+              "groups as expected." if len(order) > 1 else "Only one observation type had scored observers."))
+    return fig, cap
 
 
-def _cm_trace(cm):
-    cm = np.asarray(cm, dtype=float)
-    labels = ["normal", "anomalous"]
-    return go.Heatmap(z=cm, x=labels, y=labels, colorscale=SEQ, zmin=0, zmax=max(cm.max(), 1),
-                      text=cm.astype(int).astype(str), texttemplate="%{text}", textfont=dict(size=26),
-                      showscale=False, hovertemplate="true %{y}<br>predicted %{x}<br>%{z:d}<extra></extra>")
+# ------------------------------------------------------------------ 6. A_k validation against ZTF
+def ak_validation(per_obs, summ):
+    s = per_obs[per_obs["low_n"] == False].dropna(subset=["A_k", "scatter_vs_ztf_mag"])  # noqa: E712
+    rho, p, n = summ.get("spearman_rho"), summ.get("p_value"), int(summ.get("observers", len(s)))
+    fig = go.Figure(go.Scatter(
+        x=s["A_k"], y=s["scatter_vs_ztf_mag"], mode="markers",
+        marker=dict(size=np.clip(np.sqrt(s["n_matched"].astype(float)) * 2, 6, 30), color=SERIES[0], opacity=0.75,
+                    line=dict(width=1, color="white")),
+        text=s["observer"], customdata=s["n_matched"],
+        hovertemplate="%{text}<br>A_k %{x:.3f}<br>scatter %{y:.3f} mag<br>%{customdata} matched<extra></extra>"))
+    fig.update_xaxes(title="A_k (agreement with other AAVSO observers)")
+    fig.update_yaxes(title="Scatter against ZTF (mag, 1.4826 x MAD)")
+    fig.update_layout(title=f"A_k checked against ZTF: Spearman ρ = {_num(rho)} (p = {_num(p, 3)}), "
+                            f"n = {n} observers")
+    enough = bool(summ.get("enough_to_conclude", n >= 10))
+    if not enough:
+        tail = (f"With only {n} observers overlapping ZTF this is too few to conclude anything; the check is reported "
+                "but not used as evidence.")
+    elif rho is not None and np.isfinite(rho) and rho < 0:
+        tail = "Higher A_k goes with smaller scatter against an independent professional survey, supporting A_k."
+    else:
+        tail = "A_k does not track the scatter against ZTF here, so this check does not support A_k."
+    cap = (f"Inference: {int(summ.get('matched_observations', 0)):,} AAVSO observations were matched to ZTF within "
+           f"1 day after removing each star/band offset; ρ = {_num(rho)} over {n} observers (marker size = matched "
+           f"points). {tail}")
+    return fig, cap
 
 
-def confusion_grid(items, out_dir, name, title, cols=None):
-    """items: list of (title, 2x2 matrix [[tn, fp], [fn, tp]]). One heatmap per model, same style for all."""
-    n = len(items)
-    cols = cols or min(n, 5)
-    rows = int(np.ceil(n / cols))
-    fig = make_subplots(rows=rows, cols=cols, subplot_titles=[t for t, _ in items],
-                        horizontal_spacing=0.07, vertical_spacing=0.22)
-    for i, (_, cm) in enumerate(items):
-        r, c = divmod(i, cols)
-        fig.add_trace(_cm_trace(cm), row=r + 1, col=c + 1)
-        fig.update_yaxes(autorange="reversed", showgrid=False, row=r + 1, col=c + 1, title="True" if c == 0 else None)
-        fig.update_xaxes(showgrid=False, row=r + 1, col=c + 1, title="Predicted")
-    fig.update_layout(title=title)
-    return save(fig, out_dir, name, width=max(750, 430 * cols + 160), height=480 * rows + 170)
+# ------------------------------------------------------------------ 7. sunburst source -> class -> VSX type
+def composition_sunburst(comp):
+    """comp: source, class, vsx_type, rows (AAVSO + ZTF)."""
+    st = _style()
+    c = comp.copy()
+    c["vsx_type"] = c["vsx_type"].fillna("unknown").astype(str)
+    c = c.groupby(["source", "class", "vsx_type"], as_index=False)["rows"].sum()
+    ids, labels, parents, values, colors = [], [], [], [], []
+    for src, g in c.groupby("source"):
+        ids.append(src); labels.append(src); parents.append(""); values.append(g["rows"].sum())
+        colors.append(st["sources"].get(src, SERIES[0]))
+        for cl, h in g.groupby("class"):
+            ids.append(f"{src}/{cl}"); labels.append(cl); parents.append(src); values.append(h["rows"].sum())
+            colors.append(st["classes"].get(cl, OTHER))
+            for r in h.itertuples():
+                ids.append(f"{src}/{cl}/{r.vsx_type}"); labels.append(r.vsx_type); parents.append(f"{src}/{cl}")
+                values.append(r.rows); colors.append(st["classes"].get(cl, OTHER))
+    fig = go.Figure(go.Sunburst(ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
+                                marker=dict(colors=colors, line=dict(color="white", width=1)),
+                                hovertemplate="%{label}<br>%{value:,} rows<br>%{percentParent:.1%} of parent"
+                                              "<extra></extra>"))
+    fig.update_layout(title="Data composition: source -> class -> VSX type (sized by observation rows)")
+    tot = c.groupby("source")["rows"].sum()
+    lab = c[c["class"] != "unlabelled"].groupby("source")["rows"].sum()
+    top = c[c["class"] != "unlabelled"].sort_values("rows", ascending=False).head(1)
+    cap = ("Inference: " + "; ".join(f"{s} has {_int(tot[s])} rows, {lab.get(s, 0) / tot[s] * 100:.1f} % of them "
+                                    "labelled" for s in tot.index)
+           + (f". The largest labelled group is {top['vsx_type'].iloc[0]} ({top['class'].iloc[0]}, "
+              f"{_int(top['rows'].iloc[0])} rows), so class balance is handled with class weights and balanced "
+              "sampling." if len(top) else "."))
+    return fig, cap
 
 
-def confusion(cm, title, out_dir, name):
-    return confusion_grid([(title, cm)], out_dir, name, title="Confusion matrix")
+# ------------------------------------------------------------------ 8/9. comparison tables
+def comparison_table_fig(comp, metrics, labels, title):
+    t = comp[["display_name", "role"] + list(metrics)].rename(columns=dict(display_name="Model", role="Role",
+                                                                           **{m: labels[m] for m in metrics}))
+    return table_figure(t, title, col_widths=[3.2, 2.2] + [1.4] * len(metrics))
 
 
-def confusion_side_by_side(cm_a, title_a, cm_b, title_b, out_dir, name):
-    return confusion_grid([(title_a, cm_a), (title_b, cm_b)], out_dir, name, title="Confusion matrices")
+def caption_comparison(comp, level):
+    c = comp[comp["level"] == level]
+    b = c.loc[c["mcc_mean"].idxmax()]
+    rg = c[c["role"] == "proposed"]
+    pri = c[c["role"] == "prior approach"]
+    bp = pri.loc[pri["mcc_mean"].idxmax()] if len(pri) else None
+    s = f"Inference: at {level} level the highest mean MCC is {b['display_name']} ({b['mcc']})."
+    if len(rg) and bp is not None:
+        r = rg.iloc[0]
+        s += (f" RGA-Net reaches {r['mcc']} against the best prior approach, {bp['display_name']} ({bp['mcc']}), "
+              f"a difference of {r['mcc_mean'] - bp['mcc_mean']:+.3f}; AUPRC {r['pr_auc']} vs {bp['pr_auc']}.")
+    return s
 
 
-def grouped_metrics(pdf, out_dir, metrics=("precision", "recall", "f1", "balanced_accuracy"),
-                    title="Existing observer-agnostic classifiers vs observer-aware models (one seed)",
-                    name="fig_model_comparison", std=None, labels=None):
-    """pdf: column model + one column per metric. Optional std (same columns): drawn as error bars.
-    labels: optional display name per metric (e.g. {"roc_auc": "ROC-AUC"})."""
+# ------------------------------------------------------------------ 10. radar
+def radar(comp, level, models_order):
+    """5 models x 5 metrics; Brier is shown as 1 - Brier so that outward = better on every axis."""
+    st = _style()
+    axes = ["MCC", "ROC-AUC", "AUPRC", "Cohen's κ", "1 − Brier (inverted)"]
     fig = go.Figure()
-    for i, m in enumerate(metrics):
-        err = None if std is None else dict(type="data", array=std[m].fillna(0), visible=True, thickness=1.5, width=5)
-        fig.add_bar(x=pdf["model"], y=pdf[m].fillna(0), name=(labels or {}).get(m, m.replace("_", " ")),
-                    marker_color=SERIES[i % len(SERIES)], error_y=err)
-    fig.update_yaxes(range=[0, 1.1], title="Score (anomalous = positive class)")
-    fig.update_layout(title=title, barmode="group", bargap=0.25,
-                      legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.15))
-    return save(fig, out_dir, name, height=850)
+    c = comp[comp["level"] == level].set_index("model")
+    for m in models_order:
+        if m not in c.index:
+            continue
+        r = c.loc[m]
+        vals = [r["mcc_mean"], r["roc_auc_mean"], r["pr_auc_mean"], r["kappa_mean"], 1 - r["brier_mean"]]
+        fig.add_trace(go.Scatterpolar(r=vals + vals[:1], theta=axes + axes[:1], name=r["display_name"],
+                                      line=dict(color=st["models"][m]["color"], width=4 if m == "RGA-Net" else 2),
+                                      fill="toself" if m == "RGA-Net" else None, opacity=0.9))
+    fig.update_layout(title=f"Proposed RGA-Net vs the prior approaches ({level} level, mean over seeds)",
+                      polar=dict(radialaxis=dict(range=[min(0, float(np.nanmin(c[['mcc_mean', 'kappa_mean']].values)))
+                                                        , 1], title="score (outward = better)")),
+                      legend=dict(title="Model"))
+    rg = c.loc["RGA-Net"] if "RGA-Net" in c.index else None
+    if rg is None:
+        return fig, "Inference: RGA-Net results are missing."
+    wins = []
+    for k, lab in (("mcc", "MCC"), ("roc_auc", "ROC-AUC"), ("pr_auc", "AUPRC"), ("kappa", "κ"), ("brier", "Brier")):
+        others = c.drop(index="RGA-Net")[f"{k}_mean"]
+        best = others.min() if k == "brier" else others.max()
+        if (rg[f"{k}_mean"] < best) if k == "brier" else (rg[f"{k}_mean"] > best):
+            wins.append(lab)
+    return fig, (f"Inference: RGA-Net is ahead of every prior approach on {len(wins)} of 5 metrics"
+                 + (f" ({', '.join(wins)})" if wins else "") + f"; its MCC is {rg['mcc']}. Brier is drawn as "
+                 "1 − Brier so that a larger polygon is better on every axis.")
 
 
-def silhouette(pdf, best_k, out_dir):
-    """pdf: k, silhouette."""
-    fig = go.Figure(go.Scatter(x=pdf["k"], y=pdf["silhouette"], mode="lines+markers", name="silhouette",
-                               line=dict(color=SERIES[0], width=3), marker=dict(size=11)))
-    b = pdf[pdf["k"] == best_k]
-    fig.add_trace(go.Scatter(x=b["k"], y=b["silhouette"], mode="markers", name=f"chosen k = {best_k}",
-                             marker=dict(color=SERIES[1], size=20)))
-    fig.update_xaxes(title="k (number of clusters)", dtick=1)
-    fig.update_yaxes(title="Silhouette score")
-    fig.update_layout(title="K-Means: silhouette by k")
-    return save(fig, out_dir, "fig_kmeans_silhouette", width=1200, height=750)
+# ------------------------------------------------------------------ 11. dumbbell (Fix 1)
+def dumbbell(gain_mcc, comp, level):
+    """gain_mcc: model, without_mean, with_mean, seeds_ahead, seeds (MCC). RGA-Net full as a reference line."""
+    st = _style()
+    fig = go.Figure()
+    g = gain_mcc.reset_index(drop=True)
+    names = [st["models"][m]["name"] for m in g["model"]]
+    for i, r in g.iterrows():
+        fig.add_trace(go.Scatter(x=[r["without_mean"], r["with_mean"]], y=[names[i]] * 2, mode="lines",
+                                 line=dict(color=GRID, width=6), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=g["without_mean"], y=names, mode="markers", name="without observer features (prior)",
+                             marker=dict(size=18, color="white", line=dict(width=3, color=SERIES[0]))))
+    fig.add_trace(go.Scatter(x=g["with_mean"], y=names, mode="markers", name="with observer features (our framework)",
+                             marker=dict(size=18, color=SERIES[0])))
+    rg = comp[(comp["level"] == level) & (comp["role"] == "proposed")]
+    if len(rg):
+        x = rg["mcc_mean"].iloc[0]
+        fig.add_vline(x=x, line=dict(color=st["models"]["RGA-Net"]["color"], width=3, dash="dash"),
+                      annotation_text=f"RGA-Net full {x:.3f}", annotation_position="top")
+    fig.update_xaxes(title="Test MCC (mean over seeds)")
+    fig.update_yaxes(title="Classic model", showgrid=False)
+    fig.update_layout(title=f"Adding observer features to classic models ({level} level): MCC without -> with",
+                      legend=dict(orientation="h", y=-0.18))
+    up = int((g["with_mean"] > g["without_mean"]).sum())
+    best = g.loc[(g["with_mean"] - g["without_mean"]).idxmax()]
+    cap = (f"Inference: observer features raise the mean MCC of {up} of {len(g)} classic models; the largest change is "
+           f"{st['models'][best['model']]['name']} ({best['without_mean']:.3f} -> {best['with_mean']:.3f}, better on "
+           f"{int(best['seeds_ahead'])} of {int(best['seeds'])} seeds). The open circles are the prior approaches; "
+           "the filled circles already use our reliability framework, so only the open ones are compared with "
+           "RGA-Net (dashed line) as prior work.")
+    return fig, cap
 
 
-def roc_pr(curves, out_dir, name, title):
-    """curves: list of dict(label, fpr, tpr, roc_auc, recall, precision, pr_auc); positive-class prevalence
-    as `prevalence` (the no-skill PR line). Both panels use the same 0-1 axes for every model."""
-    fig = make_subplots(rows=1, cols=2, subplot_titles=("ROC curve (test windows)", "Precision-recall curve (test windows)"),
-                        horizontal_spacing=0.1)
-    for i, c in enumerate(curves):
-        col = SERIES[i % len(SERIES)]
-        width = 4 if i == 0 else 2.5
-        fig.add_trace(go.Scatter(x=c["fpr"], y=c["tpr"], mode="lines", name=f"{c['label']} (AUC {c['roc_auc']:.2f})",
-                                 legendgroup=c["label"], line=dict(color=col, width=width)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=c["recall"], y=c["precision"], mode="lines", line_shape="hv",
-                                 name=f"{c['label']} (AP {c['pr_auc']:.2f})", legendgroup=c["label"],
-                                 line=dict(color=col, width=width)), row=1, col=2)
-    fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="chance", line=dict(color=OTHER, dash="dash")),
-                  row=1, col=1)
-    if curves:
-        prev = curves[0]["prevalence"]
-        fig.add_trace(go.Scatter(x=[0, 1], y=[prev, prev], mode="lines", name=f"no skill (prevalence {prev:.2f})",
-                                 line=dict(color=OTHER, dash="dot")), row=1, col=2)
-    fig.update_xaxes(range=[0, 1], showgrid=True)
-    fig.update_yaxes(range=[0, 1.02])
-    fig.update_xaxes(title="False positive rate", row=1, col=1)
-    fig.update_yaxes(title="True positive rate (recall)", row=1, col=1)
-    fig.update_xaxes(title="Recall", row=1, col=2)
-    fig.update_yaxes(title="Precision", row=1, col=2)
-    fig.update_layout(title=title, legend=dict(x=1.01, y=0.5, yanchor="middle", font=dict(size=14)))
-    return save(fig, out_dir, name, width=1900, height=850)
+# ------------------------------------------------------------------ 12. ablation dot plot
+def ablation_dots(ab, level, order):
+    st = _style()
+    a = ab[ab["level"] == level].set_index("variant")
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("MCC", "AUPRC"), shared_yaxes=True, horizontal_spacing=0.06)
+    for j, m in enumerate(("mcc", "pr_auc"), start=1):
+        for v in order:
+            if v not in a.index:
+                continue
+            fig.add_trace(go.Scatter(x=[a.loc[v, f"{m}_mean"]], y=[a.loc[v, "display_name"]], mode="markers",
+                                     error_x=dict(type="data", array=[a.loc[v, f"{m}_std"]], thickness=2, width=8),
+                                     marker=dict(size=16, color=st["variant_colors"].get(v, OTHER)),
+                                     name=a.loc[v, "display_name"], showlegend=j == 1), row=1, col=j)
+    fig.update_xaxes(title_text="test score (mean ± std over seeds)")
+    fig.update_layout(title=f"Ablation of RGA-Net ({level} level)", legend=dict(orientation="h", y=-0.2))
+    if "full" not in a.index:
+        return fig, "Inference: the full model is missing."
+    f = a.loc["full", "mcc_mean"]
+    parts = [f"{a.loc[v, 'display_name']} {a.loc[v, 'mcc_mean'] - f:+.3f}" for v in order if v != "full" and v in a.index]
+    worst = min((v for v in order if v != "full" and v in a.index), key=lambda v: a.loc[v, "mcc_mean"], default=None)
+    return fig, (f"Inference: full RGA-Net MCC is {a.loc['full', 'mcc']}; change when a part is removed: "
+                 + "; ".join(parts) + "." + (f" Removing '{a.loc[worst, 'display_name']}' costs the most. Error bars "
+                                             "are the seed-to-seed standard deviation." if worst else ""))
 
 
-def training_curves(hist, out_dir, name, title):
-    """hist: epoch, train_loss, val_loss, val_pr_auc, seed (one model variant). One line per seed."""
-    fig = make_subplots(rows=1, cols=2, subplot_titles=("Loss (class-weighted BCE)", "Validation PR-AUC"),
-                        horizontal_spacing=0.1)
-    for i, (seed, h) in enumerate(hist.groupby("seed")):
-        col = SERIES[i % len(SERIES)]
-        fig.add_trace(go.Scatter(x=h["epoch"], y=h["train_loss"], mode="lines", name=f"seed {seed}: train",
-                                 legendgroup=str(seed), line=dict(color=col, width=2.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=h["epoch"], y=h["val_loss"], mode="lines", name=f"seed {seed}: validation",
-                                 legendgroup=str(seed), line=dict(color=col, width=2.5, dash="dash")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=h["epoch"], y=h["val_pr_auc"], mode="lines", name=f"seed {seed}: val PR-AUC",
-                                 legendgroup=str(seed), showlegend=False, line=dict(color=col, width=2.5)), row=1, col=2)
-        b = h.loc[h["val_pr_auc"].idxmax()]
-        fig.add_trace(go.Scatter(x=[b["epoch"]], y=[b["val_pr_auc"]], mode="markers", showlegend=False,
-                                 legendgroup=str(seed), marker=dict(color=col, size=12, symbol="star")), row=1, col=2)
-    fig.update_xaxes(title="Epoch")
-    fig.update_yaxes(title="Loss", row=1, col=1)
-    fig.update_yaxes(title="PR-AUC (star = best epoch, weights kept)", range=[0, 1.02], row=1, col=2)
-    fig.update_layout(title=title, legend=dict(x=1.01, y=0.5, yanchor="middle", font=dict(size=13)))
-    return save(fig, out_dir, name, width=1900, height=850)
+# ------------------------------------------------------------------ 13. confusion matrices at the median-MCC seed
+def confusion_grid(per_seed, level, models_order, seed):
+    st = _style()
+    d = per_seed[(per_seed["level"] == level) & (per_seed["seed"] == seed)].set_index(["model", "variant"])
+    keys = [(m, "without_observer") if m != "RGA-Net" else (m, "full") for m in models_order]
+    keys = [k for k in keys if k in d.index]
+    fig = make_subplots(rows=1, cols=len(keys), subplot_titles=[st["models"][k[0]]["name"] for k in keys],
+                        horizontal_spacing=0.05)
+    for j, k in enumerate(keys, start=1):
+        r = d.loc[k]
+        cm = np.array([[r["tn"], r["fp"]], [r["fn"], r["tp"]]], float)
+        pct = cm / cm.sum(1, keepdims=True).clip(min=1) * 100
+        fig.add_trace(go.Heatmap(z=pct, x=["pred normal", "pred anomalous"], y=["true normal", "true anomalous"],
+                                 colorscale=st.get("heatmap_colorscale", "Blues"), zmin=0, zmax=100,
+                                 showscale=j == len(keys), colorbar=dict(title="% of true class"),
+                                 text=[[f"{int(cm[i, jj])}<br>{pct[i, jj]:.0f}%" for jj in range(2)] for i in range(2)],
+                                 texttemplate="%{text}", textfont=dict(size=15)), row=1, col=j)
+        fig.update_yaxes(autorange="reversed", row=1, col=j, showticklabels=j == 1)
+    fig.update_layout(title=f"Confusion matrices on the test set at seed {seed} (the median-MCC seed of RGA-Net), "
+                            f"{level} level")
+    rg = d.loc[("RGA-Net", "full")] if ("RGA-Net", "full") in d.index else None
+    cap = (f"Inference: seed {seed} is shown because RGA-Net's MCC there is the median over seeds, so it is neither a "
+           "best nor a worst case. ")
+    if rg is not None:
+        rec = rg["tp"] / max(rg["tp"] + rg["fn"], 1) * 100
+        spec = rg["tn"] / max(rg["tn"] + rg["fp"], 1) * 100
+        cap += (f"RGA-Net finds {rec:.0f} % of anomalous and {spec:.0f} % of normal test {level}s "
+                f"({int(rg['fp'])} false alarms, {int(rg['fn'])} misses) at the threshold chosen on validation.")
+    return fig, cap
 
 
-def scalability(df, cores, out_dir):
-    """df: executors, time_mean, time_std, speedup. Time with error bars, and speedup vs ideal."""
-    fig = make_subplots(rows=1, cols=2, subplot_titles=("Run time (mean ± std of the runs)", "Speedup vs 1 executor"),
-                        horizontal_spacing=0.12)
-    x = [str(e) for e in df["executors"]]
-    fig.add_bar(x=x, y=df["time_mean"], marker_color=SERIES[0], name="time",
-                error_y=dict(type="data", array=df["time_std"].fillna(0), visible=True, thickness=1.5, width=6),
-                text=[f"{v:.0f} s" for v in df["time_mean"]], textposition="outside", cliponaxis=False, row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["executors"], y=df["speedup"], mode="lines+markers", name="measured",
-                             line=dict(color=SERIES[1], width=3), marker=dict(size=12)), row=1, col=2)
-    fig.add_trace(go.Scatter(x=df["executors"], y=df["executors"] / df["executors"].min(), mode="lines", name="ideal (linear)",
-                             line=dict(color=OTHER, dash="dash")), row=1, col=2)
-    fig.update_xaxes(title="Spark executors on YARN", row=1, col=1)
-    fig.update_xaxes(title="Spark executors on YARN", tickvals=list(df["executors"]), row=1, col=2)
-    fig.update_yaxes(title="Seconds", rangemode="tozero", row=1, col=1)
-    fig.update_yaxes(title="Speedup", rangemode="tozero", row=1, col=2)
-    fig.update_layout(title=f"Scalability: Spark preprocessing + windowing through YARN ({cores} CPU cores)",
-                      legend=dict(x=1.01, y=0.5))
-    return save(fig, out_dir, "fig_scalability", width=1700, height=800)
+def median_seed(per_seed, level, model="RGA-Net", variant="full"):
+    s = per_seed[(per_seed["model"] == model) & (per_seed["variant"] == variant) & (per_seed["level"] == level)]
+    s = s.sort_values(["mcc", "seed"]).reset_index(drop=True)
+    return int(s.loc[(len(s) - 1) // 2, "seed"])
