@@ -182,4 +182,28 @@ Spark). The reliability gate is one line in `src/cosmic/rganet.py`, `GatedSelfAt
 HDFS, offline VSX and field-centre files. Java 8, 11 or 17 is required (Spark 3.5 + Arrow fail on Java 21). Outputs go
 to `synthetic_run/` only. Unit tests: `python -m pytest -q tests`.
 
-LOCAL_E2E_TIMINGS
+Measured local run (28 Oct 2026; `scripts/local_e2e.sh` from scratch; 2 CPU cores, Java 17, synthetic data:
+9,474 AAVSO rows, 6 ZTF files with 108,593 epochs; RGA-Net with 1 pre-training epoch and at most 3 fine-tuning
+epochs). Exit code 0, 17 min 57 s wall time. **Not Colab and not real data: these times only show that every step
+runs.**
+
+| Step | Wall time | Mode |
+|---|---|---|
+| `audit` | 0.2 s | plain Python |
+| `ingest` | 16.4 s | Spark (local[2]) |
+| `preprocess` | 14.1 s | Spark (local[2]) |
+| `score` | 8.0 s | Spark (local[2]) |
+| `features` | 8.0 s | Spark (local[2]) |
+| `ztf_ingest` | 5.3 s | Spark (local[2]) |
+| `ztf_clean` | 9.7 s | Spark (local[2]) |
+| `ztf_label` | 4.5 s | Spark (local[2]) |
+| `windows` | 31.3 s | Spark (local[2]) |
+| `ztf_windows` | 67.9 s | Spark (local[2]) |
+| `akval` | 2.1 s | Spark (local[2]) |
+| `cluster` | 20.6 s | Spark (local[2]) |
+| `classify` | 332.9 s | Spark (local[2]) |
+| `rganet` | 427.0 s | plain Python + PyTorch |
+| `infer` | 34.8 s | Spark (local[2]) |
+| `compare` | 1.8 s | plain Python |
+| `dashboard` | 11.1 s | Spark (local[2]) |
+| `report` | 10.7 s | plain Python |
