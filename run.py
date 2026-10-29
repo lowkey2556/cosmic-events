@@ -55,8 +55,8 @@ SPARK_STEPS = ["ingest", "preprocess", "score", "features", "windows", "cluster"
                "ztf_ingest", "ztf_clean", "ztf_label", "ztf_windows", "akval", "dashboard"]
 LOCAL_STEPS = ["paths", "audit", "ztf_select", "ztf_download", "ztf_audit", "candidates", "architecture",
                "rganet", "compare", "report", "scalability"]
-ALL = ["audit", "architecture", "ingest", "preprocess", "score", "ztf_clean", "ztf_label", "windows", "ztf_windows",
-       "akval", "classify", "rganet", "infer", "compare", "dashboard", "report"]
+ALL = ["audit", "architecture", "ingest", "preprocess", "score", "features", "ztf_ingest", "ztf_clean", "ztf_label",
+       "windows", "ztf_windows", "akval", "cluster", "classify", "rganet", "infer", "compare", "dashboard", "report"]
 SPARK_PY = "/content/cosmic_py/bin/python"
 
 
@@ -147,11 +147,14 @@ def run_spark(steps, cfg, args):
             print(f"fresh machine: {why} -> running step '{s}' first")
     timings, granted = [], 0
     try:
+        from cosmic.dataflow import record_timing
         for s, _ in plan:
             print(f"\n{'=' * 20} STEP: {s} {'=' * 20}")
             t0 = time.time()
             mods[s].run(spark, cfg)
             timings.append((s, round(time.time() - t0, 1)))
+            if not args.timings_json:  # scalability sub-runs are timed separately (scalability_runs.csv)
+                record_timing(cfg, s, timings[-1][1], f"Spark ({sc.master})")
             granted = max(granted, sc._jsc.sc().getExecutorMemoryStatus().size() - 1)  # minus the driver
             print(f"--- {s} finished in {timings[-1][1]} s")
     finally:
@@ -177,6 +180,10 @@ def main(argv=None):
     if unknown:
         ap.error(f"unknown step(s) {unknown}; choose from {SPARK_STEPS + LOCAL_STEPS}")
     cfg = load_config(a.data, a.set)
+    nn = cfg.settings["hdfs"]["namenode"]
+    if nn.startswith("file://"):  # local smoke-test mode (spark.master=local[*]): a folder stands in for HDFS
+        os.environ["COSMIC_LOCAL_FS_ROOT"] = nn[len("file://"):]
+        os.makedirs(os.environ["COSMIC_LOCAL_FS_ROOT"], exist_ok=True)
     print(f"dataset={a.data}  hive database={cfg.db}  hdfs={cfg.hdfs_base}  python={sys.version.split()[0]}")
     check_paths(cfg, need_data=bool({"paths", "audit", "ingest", "candidates"} & set(steps)))
     from cosmic import plots
@@ -193,7 +200,13 @@ def main(argv=None):
             group = []
         if s is not None:
             print(f"\n{'=' * 20} STEP: {s} {'=' * 20}")
+            t0 = time.time()
             run_local(s, cfg, a.set)
+            if s != "paths":
+                from cosmic.dataflow import record_timing
+                secs = time.time() - t0
+                record_timing(cfg, s, secs, "plain Python" + (" + PyTorch" if s == "rganet" else ""))
+                print(f"--- {s} finished in {secs:.1f} s")
 
 
 if __name__ == "__main__":

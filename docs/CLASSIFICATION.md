@@ -28,80 +28,100 @@ the rows it had after each preprocessing step, its number of windows, and — if
 used — the exact reason (no VSX match, type not in the label map, all rows removed at a named
 step, or no window with ≥ 20 observations).
 
-## 2. Splits: by star, 5 times
+### ZTF windows (Phase 2, `ztf_windows`)
 
-- **70 % train / 15 % validation / 15 % test, by star** (`auid`), stratified by class, so
-  every set has both classes. All windows of a star go to the same set: no star is ever in two
-  sets (checked in code).
-- **5 seeds → 5 different splits.** The same 5 splits (saved once as `splits.csv` / Hive table
+Labelled ZTF light curves (VSX match within 2″; **every ZTF object within 10″ of any AAVSO star is excluded**) are cut
+into the same windows with the same code (`windows.assign_windows_from`). ZTF is one professional survey, so each token
+has A_k = 1 and offset = 0. Light curves and then windows are sampled class-balanced over all fields, at most 50,000
+windows (`ztf.pretrain_windows`). They are used for RGA-Net pre-training and, in the ML models' `aavso_ztf` data
+setting, as extra **training** windows only. ZTF windows never enter any validation or test set.
+
+## 2. Splits: by star, 10 times
+
+- **70 % train / 15 % validation / 15 % test, by star** (`auid`), stratified by class, so every set has both
+  classes. All windows of a star go to the same set: no star is ever in two sets (checked in code).
+- **10 seeds → 10 different splits** (`split.seeds`). The same splits (saved once as `work/splits.csv` / Hive table
   `splits`) are used by RGA-Net and by all four ML models.
-- **The test set is never used to choose anything.** Hyperparameters, early stopping and the
-  decision threshold all use the validation set.
+- **The test set is never used to choose anything.** Hyperparameters, data settings, early stopping and the decision
+  threshold all use the validation set.
 
-Why by star: windows of the same star look alike. If a star had windows in train and test, the
-test score would reward recognising that star, not recognising a new one.
+Why by star: windows of the same star look alike. If a star had windows in train and test, the test score would reward
+recognising that star, not recognising a new one.
 
 ## 3. The models
 
-| Model | Library | Inputs | Chosen on validation |
+| Model | Library | Inputs | Chosen on validation (best AUPRC) |
 |---|---|---|---|
-| **RGA-Net (proposed)** | PyTorch (Colab GPU) | token sequences | early-stopping epoch (best validation PR-AUC); threshold |
-| Gaussian Naive Bayes (`modelType="gaussian"`) | Spark MLlib | 13 summary features | threshold (no hyperparameters) |
-| Decision Tree | Spark MLlib | 13 summary features | maxDepth ∈ {3, 5, 8} × minInstancesPerNode ∈ {1, 10}; threshold |
-| Random Forest | Spark MLlib | 13 summary features | numTrees = 100, maxDepth ∈ {5, 10}; threshold |
-| Logistic Regression | Spark MLlib | 13 summary features | regParam ∈ {0.001, 0.01, 0.1}; threshold |
+| **RGA-Net (proposed)** | PyTorch (Colab GPU) | token sequences (+ optional summary features) | ZTF pre-training; lr × dropout × hybrid head on seed 1's validation stars; early-stopping epoch |
+| Gaussian Naive Bayes (`modelType="gaussian"`) | Spark MLlib | summary features | data setting only |
+| Decision Tree | Spark MLlib | summary features | data setting × maxDepth ∈ {5, 8} (minInstancesPerNode 5) |
+| Random Forest | Spark MLlib | summary features | data setting × (numTrees 100, maxDepth 8) |
+| Logistic Regression | Spark MLlib | summary features | data setting × regParam ∈ {0.01, 0.1} |
 
-For the ML models: median imputation and standardisation (mean and std) are **fitted on the
-training windows only**; class imbalance is handled with `weightCol` (weight = n_train /
-(2 · n_class) on the training windows); the grid setting with the best **validation PR-AUC** is
-kept. RGA-Net uses the equivalent class weighting in its loss. Details of RGA-Net:
-[PROPOSED_MODEL.md](PROPOSED_MODEL.md).
+The grids are in `config/settings.yaml` → `classify`. For the ML models, **two data settings** are tried and chosen per
+model, feature set and seed on validation AUPRC: `aavso` (AAVSO training windows only) and `aavso_ztf` (plus 10,000
+class-balanced ZTF training windows, `ztf.ml_ztf_windows`). Median imputation and standardisation are **fitted on the
+training windows only** (including the ZTF ones in `aavso_ztf`); class imbalance is handled with `weightCol`
+(weight = n_train / (2 · n_class) on the training windows). The chosen setting and the training time for every seed are
+in `ml_selected_params.csv`. Details of RGA-Net: [PROPOSED_MODEL.md](PROPOSED_MODEL.md).
 
-## 4. Metrics
+### Who is a "prior approach" (Fix 1)
 
-Every model writes the predicted probability of "anomalous" for each validation and test
-window; **one shared implementation** (`src/cosmic/evaluation.py`) then computes all metrics.
+| Role | Rows | Used for |
+|---|---|---|
+| **Prior approaches** | NB, DT, RF, LR **without** observer features (10 light-curve and cadence features) | the comparison with RGA-Net (`prior_vs_proposed_*`) |
+| **Our framework applied to classic models** | NB, DT, RF, LR **with** the 3 observer features (`w_a`, `n_observers`, `mean_abs_offset`) | reported separately (`observer_feature_gain.csv`); never called prior approaches and never used to claim an improvement over prior work |
+| **Proposed** | RGA-Net full (ZTF pre-trained, gate active) | the headline row |
+| Ablations | RGA-Net no_pretrain, no_gate, observer_blind | `ablation_table.csv` |
 
-- **Threshold:** the probability cut-off with the best F1 on the **validation** windows.
-- **On the test windows, for the anomalous class:** precision, recall, F1, balanced accuracy
-  ((recall + specificity) / 2), ROC-AUC and PR-AUC (average precision). Plain accuracy is not
-  headlined because the classes are not balanced.
-- **Star level:** a star's probability = the mean of its windows' probabilities; threshold
-  chosen on the validation stars; the same metrics on the test stars. This is the stricter view,
-  because windows of one star are correlated.
-- **Reported as mean ± std over the 5 splits**, plus training time.
+## 4. Metrics (Phase 3)
 
-## 5. Ablations and supplementary runs
+Every model writes the predicted probability of "anomalous" for each validation and test window; **one shared
+implementation** (`src/cosmic/evaluation.py`) computes every metric, from the saved prediction files only.
 
-| Run | Question it answers |
-|---|---|
-| RGA-Net full vs **no gate** (λ = 0, A_k still a token feature) | Does gating attention by reliability help, beyond giving A_k as an input? |
-| no gate vs **observer-blind** (A_k and offset removed) | Does observer information help at all, as a plain input? |
-| Each ML model **with vs without** the 3 observer features | Does observer information help the classical models? |
+- **Main metrics:** **MCC** (Matthews correlation coefficient, the headline), **ROC-AUC**, **AUPRC** (average
+  precision), **Cohen's κ** and the **Brier score** (mean squared error of the probability; lower is better).
+- **Threshold (MCC, κ):** the probability cut-off with the **highest validation MCC** (ties: closest to 0.5), chosen
+  separately at window and star level; the test set never moves it (tested). ROC-AUC, AUPRC and Brier need no threshold.
+- **Star level:** a star's probability = the mean of its windows' probabilities; the stricter view, because windows of
+  one star are correlated. Headline level: `metrics.main_level` (window).
+- **Reported as mean ± std over the 10 splits.** Precision, recall, accuracy, F1 and balanced accuracy, at the same
+  threshold, go to the appendix (`metrics_appendix.csv`).
+- **Paired tests:** for each prior approach, the per-seed differences RGA-Net − prior, the number of seeds RGA-Net is
+  ahead, and a two-sided **Wilcoxon signed-rank** p-value (SciPy) over the 10 paired seeds
+  (`prior_vs_proposed_paired.csv`); the same for each ablation (`ablation_paired.csv`) and for each classic model
+  without → with observer features (`observer_feature_gain.csv`).
 
-All runs use the same windows, splits, seeds and settings.
+MCC uses all four cells of the confusion matrix, so it is not flattered by class imbalance; κ corrects accuracy for
+chance agreement; Brier checks the probabilities themselves, not just their ranking.
 
-## 6. Distributed inference
+The ten repeated splits share stars and training data; their paired differences are not independent experimental
+replications. Treat the Wilcoxon values as descriptive, not proof of population-level significance. A large p-value
+does not establish equivalence. The current archive-wide observer calibration is transductive (see PROPOSED_MODEL);
+star-grouped splits alone do not make that preprocessing strictly inductive.
 
-After training, Spark applies the saved RGA-Net models (one per split) to **every** window in
-parallel (`mapInPandas`, Step 8b) and writes the Hive table `window_predictions` (window, star,
-label, seed, set, probability). The metrics above come from the same probabilities: the check
-file `distributed_inference_check.csv` shows the Spark and PyTorch values agree.
+## 5. Distributed inference
 
-## 7. Outputs (in `outputs/review2/`)
+After training, Spark applies the saved RGA-Net models (one per split) to **every** window in parallel (`mapInPandas`,
+`infer`) and writes the Hive table `window_predictions`. `distributed_inference_check.csv` compares the Spark and
+PyTorch probabilities on the validation/test windows.
 
-`comparison_table.csv` (window level) and `comparison_table_star_level.csv`; `ablation_table.csv`;
-`ml_observer_features_table.csv`; `metrics_per_seed.csv` (every number before averaging);
-`rganet_learned_lambda.csv`; figures `fig_comparison_metrics`, `fig_roc_pr_curves`,
-`fig_confusion_matrices`, `fig_rganet_training_curves`, `fig_ablation` (each `.png` + `.html`);
-and `COMPARISON.md`, written from the numbers, which states which model is best on which metric,
-by how much, and whether the gap is larger than the seed-to-seed spread.
+## 6. Outputs (in `v3_5GB/outputs/`, all made by `compare` from the saved predictions)
 
-## 8. Honest limits
+`per_seed_metrics.csv` (every model × variant × seed × level, with threshold and confusion counts),
+`comparison_table.csv` (both levels, mean ± std), `prior_vs_proposed_table.csv`, `prior_vs_proposed_paired.csv`,
+`observer_feature_gain.csv`, `ablation_table.csv`, `ablation_paired.csv`, `rganet_lambda.csv`, `metrics_appendix.csv`
+and `COMPARISON.md`, written from the numbers: the best model per metric and whether the gap exceeds the seed spread,
+RGA-Net vs each prior approach (seeds ahead, Wilcoxon p), the effect of ZTF pre-training and of the gate, and an honest
+line about the classic models with observer features. The `report` step turns these into figures 08–13 with generated
+"Inference:" captions (`outputs/figures/`, `figure_captions.md`).
 
-- About 60 stars in total, so each test set holds only a few stars per class. One star can move
-  recall or precision a lot; that is why every result is a mean ± std over 5 splits.
-- "Larger than the seed-to-seed spread" is a rough check (gap in means vs the larger standard
-  deviation, plus how many of the 5 seeds the better model wins), not a formal significance test.
-- If RGA-Net is not the best model, the tables and `COMPARISON.md` say so; nothing is re-run
-  or re-tuned to change that.
+## 7. Honest limits
+
+- About 50 labelled AAVSO stars have windows, so each test set holds only a few stars per class. One star can move a
+  metric a lot; that is why every result is a mean ± std over 10 splits and the comparisons are paired by seed.
+- With 10 seeds the Wilcoxon test can only reach p < 0.05 when one model wins on most seeds; a larger p means the
+  difference is not reliable, and `COMPARISON.md` says so.
+- The 10 test sets overlap (each is 15 % of the same ~50 stars), so the seeds are not independent samples; the
+  Wilcoxon p-values are a guide, not an exact significance level.
+- If RGA-Net is not the best model, the tables and `COMPARISON.md` say so; nothing is re-run or re-tuned to change that.

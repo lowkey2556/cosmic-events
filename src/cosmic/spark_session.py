@@ -27,8 +27,45 @@ def _package_zip():
     return shutil.make_archive(base, "zip", os.path.join(REPO_ROOT, "src"), "cosmic")
 
 
+def is_local(cfg):
+    """Local smoke-test mode: spark.master=local[...] and hdfs.namenode=file://... (no YARN, HDFS or Hive service).
+    Used only to run the whole step chain on a laptop/CI with synthetic data; Colab always uses YARN + HDFS + Hive."""
+    return str(cfg.section("spark")["master"]).startswith("local")
+
+
+def _local_spark(cfg):
+    s = cfg.section("spark")
+    base = cfg.settings["hdfs"]["namenode"]
+    if not base.startswith("file://"):
+        raise ValueError("local mode needs hdfs.namenode=file:///some/folder (no HDFS service is started)")
+    meta = os.path.join(base[len("file://"):], "_metastore")
+    os.makedirs(meta, exist_ok=True)
+    py = os.environ.get("PYSPARK_PYTHON", sys.executable)
+    os.environ.setdefault("PYSPARK_PYTHON", py)
+    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (os.path.join(REPO_ROOT, "src"), os.environ.get("PYTHONPATH"))
+                                               if p)
+    spark = (SparkSession.builder.appName(f"{s['app_name']}-{cfg.dataset}-local").master(s["master"])
+             .config("spark.driver.memory", s["driver_memory"])
+             .config("spark.sql.shuffle.partitions", str(s["shuffle_partitions"]))
+             .config("spark.sql.session.timeZone", "UTC")
+             .config("spark.sql.parquet.compression.codec", "snappy")
+             .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
+             .config("spark.sql.warehouse.dir", base + s["warehouse_dir"])
+             .config("spark.hadoop.javax.jdo.option.ConnectionURL",
+                     f"jdbc:derby:;databaseName={os.path.join(meta, 'metastore_db')};create=true")
+             .config("spark.driver.extraJavaOptions", f"-Dderby.system.home={meta}")
+             .config("spark.sql.execution.arrow.pyspark.enabled", "true")
+             .config("spark.ui.enabled", "false")
+             .enableHiveSupport().getOrCreate())
+    spark.sparkContext.setLogLevel("ERROR")
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {cfg.db} LOCATION '{cfg.hdfs_uri(cfg.hdfs_base)}/warehouse/{cfg.db}.db'")
+    return spark
+
+
 def get_spark(cfg):
     s = cfg.section("spark")
+    if is_local(cfg):
+        return _local_spark(cfg)
     hive_home = os.environ.get("HIVE_HOME")
     if not hive_home:
         raise RuntimeError("HIVE_HOME is not set: source the stack env (setup/start_stack.sh) first")
@@ -65,8 +102,37 @@ def get_spark(cfg):
     return spark
 
 
+LOCAL_FS_ROOT = os.environ.get("COSMIC_LOCAL_FS_ROOT")  # set by run.py in local smoke-test mode only
+
+
+def _local_hdfs(args):
+    """The few `hdfs dfs` commands the pipeline uses (-rm -r, -mkdir -p, -put -f, -ls), on a local folder that stands
+    in for HDFS in local smoke-test mode."""
+    import glob
+    root = LOCAL_FS_ROOT or os.environ["COSMIC_LOCAL_FS_ROOT"]
+    p = lambda x: os.path.join(root, x.lstrip("/"))  # noqa: E731
+    op, rest = args[0], [a for a in args[1:] if not a.startswith("-")]
+    if op == "-rm":
+        for x in rest:
+            shutil.rmtree(p(x), ignore_errors=True)
+    elif op == "-mkdir":
+        for x in rest:
+            os.makedirs(p(x), exist_ok=True)
+    elif op == "-put":
+        *srcs, dst = rest
+        os.makedirs(p(dst), exist_ok=True)
+        for f in srcs:
+            shutil.copy(f, p(dst))
+    elif op == "-ls":
+        return "\n".join(sorted(glob.glob(os.path.join(p(rest[0]), "**"), recursive=True)))
+    return ""
+
+
 def hdfs(*args, check=True):
     """Run `hdfs dfs <args>` and return stdout (printed so notebook cells show it)."""
+    if LOCAL_FS_ROOT or os.environ.get("COSMIC_LOCAL_FS_ROOT"):
+        print("$ (local stand-in for HDFS) hdfs dfs " + " ".join(args))
+        return _local_hdfs(args)
     cmd = ["hdfs", "dfs", *args]
     res = subprocess.run(cmd, capture_output=True, text=True)
     print("$ " + " ".join(cmd))

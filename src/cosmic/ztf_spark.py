@@ -41,10 +41,10 @@ import pandas as pd
 from . import dataflow
 from .spark_session import path_bytes, save_csv, save_hive_table, table_bytes, table_files
 
-RAW_DDL = """objectid BIGINT, filterid TINYINT, fieldid SMALLINT, rcid TINYINT, objra FLOAT, objdec FLOAT,
-  nepochs BIGINT, hmjd ARRAY<DOUBLE>, mag ARRAY<FLOAT>, magerr ARRAY<FLOAT>, clrcoeff ARRAY<FLOAT>, catflags ARRAY<INT>"""
-CLEAN_DDL = """objectid BIGINT, rcid TINYINT, objra FLOAT, objdec FLOAT, nepochs INT,
-  hmjd ARRAY<DOUBLE>, mag ARRAY<FLOAT>, magerr ARRAY<FLOAT>, clrcoeff ARRAY<FLOAT>"""
+# columns every ZTF DR light-curve file must have (one row per light curve, epochs as arrays). The exact integer
+# widths are taken from the files themselves (ddl_from_files), so the Hive table always matches the data.
+RAW_COLUMNS = ["objectid", "filterid", "fieldid", "rcid", "objra", "objdec", "nepochs", "hmjd", "mag", "magerr",
+               "clrcoeff", "catflags"]
 SEP_ARCSEC = ("DEGREES(2 * ASIN(SQRT(POW(SIN(RADIANS({d2} - {d1}) / 2), 2) + COS(RADIANS({d1})) * COS(RADIANS({d2})) "
               "* POW(SIN(RADIANS({r2} - {r1}) / 2), 2)))) * 3600")
 
@@ -53,9 +53,16 @@ def sep_sql(r1, d1, r2, d2):
     return SEP_ARCSEC.format(r1=r1, d1=d1, r2=r2, d2=d2)
 
 
-def _fs(spark):
+def ddl_from_files(spark, loc, partitions=("field", "filter")):
+    """Hive column list (without the partition columns) read from the Parquet files under loc."""
+    schema = spark.read.parquet(loc).schema
+    return ", ".join(f"`{f.name}` {f.dataType.simpleString()}" for f in schema.fields if f.name not in partitions)
+
+
+def _fs(spark, cfg):
+    """(JVM, the Hadoop FileSystem of hdfs.namenode): HDFS on Colab, the local stand-in folder in local mode."""
     jvm = spark._jvm
-    return jvm, jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI("hdfs://localhost:9000/"),
+    return jvm, jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(cfg.hdfs_uri("/")),
                                                          spark._jsc.hadoopConfiguration())
 
 
@@ -76,12 +83,21 @@ def _manifest_key(man):
     return hashlib.md5("".join(sorted(man["md5"])).encode()).hexdigest()
 
 
+def _clean_key(cfg, man):
+    """A Drive clean copy is valid only for the same raw files, quality cuts and cleaning code."""
+    keys = ("saturation_mag", "min_clean_epochs", "filters")
+    with open(__file__, "rb") as fh:
+        code = hashlib.sha256(fh.read()).hexdigest()
+    return hashlib.sha256(json.dumps([_manifest_key(man), {k: cfg.section("ztf")[k] for k in keys}, code],
+                                     sort_keys=True).encode()).hexdigest()
+
+
 # ------------------------------------------------------------------ ztf_ingest
 def ingest_run(spark, cfg):
     t0 = time.time()
     man = _manifest(cfg)
     base = cfg.hdfs_uri(f"{cfg.hdfs_base}/ztf/raw")
-    jvm, fs = _fs(spark)
+    jvm, fs = _fs(spark, cfg)
     fs.delete(jvm.org.apache.hadoop.fs.Path(base), True)
     for r in man.itertuples():
         dst = jvm.org.apache.hadoop.fs.Path(f"{base}/field={r.field}/filter={r.filter}/{os.path.basename(r.local)}")
@@ -89,8 +105,13 @@ def ingest_run(spark, cfg):
     t_put = time.time()
     print(f"copied {len(man)} files ({man['size_bytes'].sum() / 2**30:.2f} GB) into {base} in {t_put - t0:.0f} s")
     t = cfg.table("ztf_lightcurves_raw")
+    ddl = ddl_from_files(spark, base)
+    print(f"ZTF raw schema (read from the files themselves): {ddl}")
+    missing = [c for c in RAW_COLUMNS if f"`{c}` " not in ddl]
+    if missing:
+        raise ValueError(f"The ZTF files lack expected columns {missing}; schema found: {ddl}")
     spark.sql(f"DROP TABLE IF EXISTS {t}")
-    spark.sql(f"""CREATE EXTERNAL TABLE {t} ({RAW_DDL}) PARTITIONED BY (field INT, filter STRING)
+    spark.sql(f"""CREATE EXTERNAL TABLE {t} ({ddl}) PARTITIONED BY (field INT, filter STRING)
                   STORED AS PARQUET LOCATION '{base}'""")
     spark.sql(f"MSCK REPAIR TABLE {t}")
     parts = spark.sql(f"SHOW PARTITIONS {t}").count()
@@ -120,9 +141,9 @@ def _restore_clean(spark, cfg, man):
     if not (z.get("copy_clean_to_drive", True) and os.path.exists(marker)):
         return False
     with open(marker) as fh:
-        if json.load(fh).get("manifest") != _manifest_key(man):
+        if json.load(fh).get("clean_key") != _clean_key(cfg, man):
             return False
-    jvm, fs = _fs(spark)
+    jvm, fs = _fs(spark, cfg)
     dst = cfg.hdfs_uri(f"{cfg.hdfs_base}/ztf/clean")
     fs.delete(jvm.org.apache.hadoop.fs.Path(dst), True)
     fs.copyFromLocalFile(False, True, jvm.org.apache.hadoop.fs.Path("file://" + copy), jvm.org.apache.hadoop.fs.Path(dst))
@@ -134,7 +155,7 @@ def _restore_clean(spark, cfg, man):
 def _register_clean(spark, cfg, loc):
     t = cfg.table("ztf_lightcurves_clean")
     spark.sql(f"DROP TABLE IF EXISTS {t}")
-    spark.sql(f"""CREATE EXTERNAL TABLE {t} ({CLEAN_DDL}) PARTITIONED BY (field INT, filter STRING)
+    spark.sql(f"""CREATE EXTERNAL TABLE {t} ({ddl_from_files(spark, loc)}) PARTITIONED BY (field INT, filter STRING)
                   STORED AS PARQUET LOCATION '{loc}'""")
     spark.sql(f"MSCK REPAIR TABLE {t}")
 
@@ -222,12 +243,13 @@ def clean_run(spark, cfg):
     _samples(spark, cfg, raw, t_clean)
     if z.get("copy_clean_to_drive", True):
         copy = os.path.join(cfg.clean_dir, "ztf_lightcurves_clean")
-        jvm, fs = _fs(spark)
+        jvm, fs = _fs(spark, cfg)
         import shutil
         shutil.rmtree(copy, ignore_errors=True)
         fs.copyToLocalFile(False, jvm.org.apache.hadoop.fs.Path(loc), jvm.org.apache.hadoop.fs.Path("file://" + copy), True)
         with open(os.path.join(copy, "_COSMIC_SOURCE.json"), "w") as fh:
-            json.dump(dict(manifest=_manifest_key(man), made=time.strftime("%Y-%m-%d %H:%M")), fh)
+            json.dump(dict(manifest=_manifest_key(man), clean_key=_clean_key(cfg, man),
+                           made=time.strftime("%Y-%m-%d %H:%M")), fh)
         print(f"copied the cleaned table to {copy}")
     dataflow.record(cfg, "ztf_clean", "Spark SQL cleans the epoch arrays in place with higher-order functions "
                     "(filter / arrays_zip / array_distinct): invalid values, flagged and saturated epochs and exact "
@@ -300,6 +322,30 @@ def vsx_for_fields(cfg, fields):
     return v.dropna(subset=["label"])
 
 
+def match_labels(spark, obj_view, vsx_view, aavso_view, m, x):
+    """ZTF objects (obj_view: objectid, field, filter, objra, objdec) matched to the nearest VSX variable (vsx_view: name,
+    ra, dec, type, primary_type, label) within m arcsec; aavso_overlap = TRUE for every object within x arcsec of any AAVSO
+    star (aavso_view: auid, ra, dec), which keeps AAVSO stars out of the ZTF training pool. Spark equi-join on
+    declination buckets wider than the radius, then the exact angular distance."""
+    b1, b2 = 0.001, max(0.001, x / 3600 * 1.5)  # declination bucket sizes (deg) > the match radius
+    return spark.sql(f"""
+        WITH vb AS (SELECT v.*, explode(array(CAST(FLOOR(dec / {b1}) AS BIGINT) - 1, CAST(FLOOR(dec / {b1}) AS BIGINT),
+                                              CAST(FLOOR(dec / {b1}) AS BIGINT) + 1)) AS b FROM {vsx_view} v),
+             m AS (SELECT o.objectid, o.field, o.filter, o.objra, o.objdec, vb.name AS vsx_name, vb.type AS vsx_type,
+                          vb.primary_type, vb.label, {sep_sql('o.objra', 'o.objdec', 'vb.ra', 'vb.dec')} AS sep_arcsec
+                   FROM {obj_view} o JOIN vb ON CAST(FLOOR(o.objdec / {b1}) AS BIGINT) = vb.b),
+             best AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY objectid ORDER BY sep_arcsec, vsx_name) AS rk
+                      FROM m WHERE sep_arcsec <= {m}),
+             ab AS (SELECT a.*, explode(array(CAST(FLOOR(dec / {b2}) AS BIGINT) - 1, CAST(FLOOR(dec / {b2}) AS BIGINT),
+                                              CAST(FLOOR(dec / {b2}) AS BIGINT) + 1)) AS b FROM {aavso_view} a),
+             near AS (SELECT DISTINCT o.objectid
+                      FROM {obj_view} o JOIN ab ON CAST(FLOOR(o.objdec / {b2}) AS BIGINT) = ab.b
+                      WHERE {sep_sql('o.objra', 'o.objdec', 'ab.ra', 'ab.dec')} <= {x})
+        SELECT b.objectid, b.field, b.filter, b.objra, b.objdec, b.vsx_name, b.vsx_type, b.primary_type, b.label,
+               ROUND(b.sep_arcsec, 3) AS sep_arcsec, (n.objectid IS NOT NULL) AS aavso_overlap
+        FROM best b LEFT JOIN near n ON b.objectid = n.objectid WHERE b.rk = 1""")
+
+
 def label_run(spark, cfg):
     t0 = time.time()
     z = cfg.section("ztf")
@@ -313,27 +359,12 @@ def label_run(spark, cfg):
         {"ra": float, "dec": float, "label": int})).createOrReplaceTempView("zl_vsx")
     stars = spark.sql(f"SELECT auid, ra, dec FROM {cfg.table('star_labels')} WHERE ra IS NOT NULL AND dec IS NOT NULL")
     stars.createOrReplaceTempView("zl_aavso")
-    m, x = float(z["label_match_arcsec"]), float(z["aavso_exclusion_arcsec"])
-    b1, b2 = 0.001, max(0.001, x / 3600 * 1.5)  # declination bucket sizes (deg) > the match radius
     spark.sql(f"SELECT DISTINCT objectid, field, filter, objra, objdec FROM {clean}").createOrReplaceTempView("zl_obj")
-    spark.sql(f"""
-        WITH vb AS (SELECT v.*, explode(array(CAST(FLOOR(dec / {b1}) AS BIGINT) - 1, CAST(FLOOR(dec / {b1}) AS BIGINT),
-                                              CAST(FLOOR(dec / {b1}) AS BIGINT) + 1)) AS b FROM zl_vsx v),
-             m AS (SELECT o.objectid, o.field, o.filter, o.objra, o.objdec, vb.name AS vsx_name, vb.type AS vsx_type,
-                          vb.primary_type, vb.label, {sep_sql('o.objra', 'o.objdec', 'vb.ra', 'vb.dec')} AS sep_arcsec
-                   FROM zl_obj o JOIN vb ON CAST(FLOOR(o.objdec / {b1}) AS BIGINT) = vb.b),
-             best AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY objectid ORDER BY sep_arcsec, vsx_name) AS rk
-                      FROM m WHERE sep_arcsec <= {m}),
-             ab AS (SELECT a.*, explode(array(CAST(FLOOR(dec / {b2}) AS BIGINT) - 1, CAST(FLOOR(dec / {b2}) AS BIGINT),
-                                              CAST(FLOOR(dec / {b2}) AS BIGINT) + 1)) AS b FROM zl_aavso a),
-             near AS (SELECT DISTINCT o.objectid
-                      FROM zl_obj o JOIN ab ON CAST(FLOOR(o.objdec / {b2}) AS BIGINT) = ab.b
-                      WHERE {sep_sql('o.objra', 'o.objdec', 'ab.ra', 'ab.dec')} <= {x})
-        SELECT b.objectid, b.field, b.filter, b.objra, b.objdec, b.vsx_name, b.vsx_type, b.primary_type, b.label,
-               ROUND(b.sep_arcsec, 3) AS sep_arcsec, (n.objectid IS NOT NULL) AS aavso_overlap
-        FROM best b LEFT JOIN near n ON b.objectid = n.objectid WHERE b.rk = 1""").createOrReplaceTempView("zl_out")
+    match_labels(spark, "zl_obj", "zl_vsx", "zl_aavso", float(z["label_match_arcsec"]),
+                 float(z["aavso_exclusion_arcsec"])).createOrReplaceTempView("zl_out")
     save_hive_table(spark.table("zl_out"), cfg, "ztf_labels")
     lab = cfg.table("ztf_labels")
+    m, x = float(z["label_match_arcsec"]), float(z["aavso_exclusion_arcsec"])
     counts = spark.sql(f"""SELECT CASE label WHEN 1 THEN 'anomalous' ELSE 'normal' END AS class,
                                   SUM(CASE WHEN aavso_overlap THEN 0 ELSE 1 END) AS lightcurves_in_pool,
                                   SUM(CASE WHEN aavso_overlap THEN 1 ELSE 0 END) AS excluded_near_aavso_star,

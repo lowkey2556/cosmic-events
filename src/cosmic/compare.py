@@ -80,10 +80,13 @@ def paired(per_seed, a, b, level, metrics=METRICS):
     m = sa.merge(sb, on="seed", suffixes=("_a", "_b"))
     for metric in metrics:
         d = (m[f"{metric}_a"] - m[f"{metric}_b"]).to_numpy(float)
+        d = d[np.isfinite(d)]
         ahead = int(np.sum(d < 0)) if metric in LOWER_IS_BETTER else int(np.sum(d > 0))
+        behind = int(np.sum(d > 0)) if metric in LOWER_IS_BETTER else int(np.sum(d < 0))
         rows.append(dict(level=level, metric=metric, mean_difference=float(np.nanmean(d)) if len(d) else np.nan,
                          std_difference=float(np.nanstd(d, ddof=1)) if len(d) > 1 else np.nan,
-                         seeds_ahead=ahead, seeds=len(d), wilcoxon_p=wilcoxon_p(d),
+                         seeds_ahead=ahead, seeds_behind=behind, seeds_tied=int(np.sum(d == 0)),
+                         seeds=len(d), wilcoxon_p=wilcoxon_p(d),
                          per_seed_differences=" ".join(f"{x:+.3f}" for x in d)))
     return pd.DataFrame(rows)
 
@@ -215,6 +218,9 @@ def write_markdown(cfg, per_seed, ms, comp, pvp, gain, ab, ab_d, lam):
          f"**{level}**; star level (mean window probability per star) is in comparison_table.csv.\n",
          "Prior approaches = the four classic ML models without observer features. Proposed = RGA-Net full "
          "(pre-trained on ZTF, reliability gate active).\n",
+         "The repeated star splits overlap, so per-seed differences are not independent replications. "
+         "Wilcoxon p-values are descriptive; they do not establish significance on an independent population, "
+         "and a large p-value does not establish equivalence.\n",
          "## Main table\n", md_table(comp[comp["level"] == level], METRICS), ""]
     # best per metric among prior + proposed
     cand = comp[(comp["level"] == level) & comp["role"].isin(["prior approach", "proposed"])]
@@ -258,7 +264,7 @@ def write_markdown(cfg, per_seed, ms, comp, pvp, gain, ab, ab_d, lam):
         r = r.iloc[0]
         d = -r["mean_difference"]  # full - variant
         L.append(f"- Full vs {variant_name(v)}: full model MCC {'higher' if d > 0 else 'lower'} by {abs(d):.3f} "
-                 f"(full ahead on {int(r['seeds']) - int(r['seeds_ahead'])} of {int(r['seeds'])} seeds; Wilcoxon "
+                 f"(full ahead on {int(r['seeds_behind'])} of {int(r['seeds'])} seeds; Wilcoxon "
                  f"{p_text(r['wilcoxon_p'])}).")
     if len(lam):
         f = lam[lam["variant"] == "full"]

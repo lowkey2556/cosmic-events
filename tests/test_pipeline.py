@@ -1,4 +1,5 @@
 """Unit tests of the pipeline logic (local-mode Spark, synthetic data only)."""
+import json
 import math
 import os
 
@@ -505,46 +506,110 @@ def test_rganet_trains_and_ablations_run(tmp_path):
     assert np.allclose(pred2["prob"], res["full"][0]["prob"], atol=1e-5)               # fixed seed: reproducible
 
 
-def test_compare_end_to_end_on_synthetic_predictions(tmp_path):
-    """Synthetic predictions in a temporary folder only: checks every table, figure and COMPARISON.md is produced."""
-    from cosmic import compare
-    from cosmic.config import load_config
-    r = np.random.default_rng(3)
+def _synthetic_predictions(seeds=(1, 2, 3), with_observer_boost=0.0, rng_seed=3):
+    """Saved-prediction files in the shape every model writes (validation and test windows, several seeds)."""
+    r = np.random.default_rng(rng_seed)
     rows = []
-    for seed in (1, 2, 3):
+    for seed in seeds:
         for s, n in (("val", 40), ("test", 40)):
             auid = np.array([f"{s}{seed}_{i % 8}" for i in range(n)]); y = (np.arange(n) % 8 < 4).astype(int)
-            for model, variant in [("RGA-Net", "full"), ("RGA-Net", "no_gate"), ("RGA-Net", "observer_blind"),
+            for model, variant in [("RGA-Net", "full"), ("RGA-Net", "no_pretrain"), ("RGA-Net", "no_gate"),
+                                   ("RGA-Net", "observer_blind"),
                                    *[(m, v) for m in ("NB", "DT", "RF", "LR") for v in ("with_observer", "without_observer")]]:
+                sep = 0.4 + (with_observer_boost if variant == "with_observer" else 0.0)
                 rows.append(pd.DataFrame(dict(model=model, variant=variant, seed=seed, set=s, auid=auid,
                                               window_id=[f"{a}#{i}" for i, a in enumerate(auid)], label=y,
-                                              prob=np.clip(0.4 * y + r.random(n) * 0.6, 0, 1))))
-    pred = pd.concat(rows)
+                                              prob=np.clip(sep * y + r.random(n) * 0.6, 0, 1))))
+    return pd.concat(rows, ignore_index=True)
+
+
+def _compare_cfg(tmp_path, pred, seeds=(1, 2, 3)):
+    from cosmic.config import load_config
     cfg = load_config("synthetic", [f"datasets.synthetic.project_root={tmp_path}",
                                     f"datasets.synthetic.output_subdir={tmp_path / 'out'}"])
     work = cfg.work_dir
     pred[pred.model == "RGA-Net"].to_csv(os.path.join(work, "predictions_rganet.csv"), index=False)
-    pred[pred.model != "RGA-Net"].to_csv(os.path.join(work, "predictions_ml.csv"), index=False)
-    pd.DataFrame([dict(variant=v, seed=s, train_seconds=10.0 + s, lambda_layer1=0.5, lambda_pool=0.7)
-                  for v in ("full", "no_gate", "observer_blind") for s in (1, 2, 3)]).to_csv(
-        os.path.join(work, "rganet_runs.csv"), index=False)
-    pd.DataFrame([dict(epoch=e, train_loss=1 / e, val_loss=1.2 / e, val_pr_auc=0.5 + e / 100, seed=s, variant="full")
-                  for s in (1, 2, 3) for e in range(1, 6)]).to_csv(os.path.join(work, "rganet_history.csv"), index=False)
-    pd.DataFrame([dict(model=m, variant=v, seed=s, fit_seconds=2.0) for m in ("NB", "DT", "RF", "LR")
-                  for v in ("with_observer", "without_observer") for s in (1, 2, 3)]).to_csv(
-        os.path.join(cfg.output_dir, "ml_selected_params.csv"), index=False)
-    cfg.settings["split"]["curves_seed"] = 1
+    pred[pred.model != "RGA-Net"].assign(data_setting="aavso").to_csv(os.path.join(work, "predictions_ml.csv"),
+                                                                      index=False)
+    pd.DataFrame([dict(variant=v, seed=s, train_seconds=10.0 + s, lambda_layer1=0.5 + s / 100, lambda_layer2=0.6,
+                       lambda_pool=0.7) for v in ("full", "no_pretrain", "no_gate", "observer_blind") for s in seeds]) \
+        .to_csv(os.path.join(work, "rganet_runs.csv"), index=False)
+    return cfg
+
+
+COMPARE_FILES = ("per_seed_metrics.csv", "comparison_table.csv", "prior_vs_proposed_table.csv",
+                 "prior_vs_proposed_paired.csv", "observer_feature_gain.csv", "ablation_table.csv", "ablation_paired.csv",
+                 "rganet_lambda.csv", "metrics_appendix.csv", "COMPARISON.md")
+
+
+def test_compare_end_to_end_on_synthetic_predictions(tmp_path):
+    """Synthetic predictions in a temporary folder only: every Phase 3 table and COMPARISON.md is produced from the saved
+    predictions, with MCC/ROC-AUC/AUPRC/kappa/Brier, both levels, and 10-seed style mean ± std."""
+    from cosmic import compare
+    cfg = _compare_cfg(tmp_path, _synthetic_predictions())
     comp = compare.run(cfg)
-    assert list(comp["model"]) == ["RGA-Net", "NB", "DT", "RF", "LR"]
     out = cfg.output_dir
-    for f in ("comparison_table.csv", "comparison_table_star_level.csv", "ablation_table.csv",
-              "ml_observer_features_table.csv", "metrics_per_seed.csv", "COMPARISON.md",
-              "fig_comparison_metrics.html", "fig_roc_pr_curves.html", "fig_confusion_matrices.html",
-              "fig_rganet_training_curves.html", "fig_ablation.html"):
+    for f in COMPARE_FILES:
         assert os.path.exists(os.path.join(out, f)), f
+    w = comp[comp["level"] == "window"]
+    assert list(w["model"]) == ["NB", "DT", "RF", "LR", "NB", "DT", "RF", "LR", "RGA-Net"]
+    assert set(comp["level"]) == {"window", "star"} and (comp["seeds"] == 3).all()
+    for m in ("mcc", "roc_auc", "pr_auc", "kappa", "brier"):
+        assert comp[m].str.contains(" ± ").all() and comp[f"{m}_mean"].notna().all()
+    ab = pd.read_csv(os.path.join(out, "ablation_table.csv"))
+    assert set(ab["variant"]) == {"full", "no_pretrain", "no_gate", "observer_blind"}
+    lam = pd.read_csv(os.path.join(out, "rganet_lambda.csv"))
+    assert set(lam["variant"]) == {"full", "no_pretrain"}                 # only gated variants have a λ
     md = open(os.path.join(out, "COMPARISON.md"), encoding="utf-8").read()
-    assert "seed-to-seed spread" in md and "RGA-Net" in md
+    for phrase in ("Prior approaches = the four classic ML models without observer features", "Wilcoxon",
+                   "larger than the seed spread", "Honest note", "Learned λ"):
+        assert phrase in md, phrase
     assert "review2" not in out.replace("\\", "/").split("/")
+
+
+def test_fix1_prior_approaches_are_classic_models_without_observer_features(tmp_path):
+    """Fix 1: the 'prior approach' rows and the RGA-Net-vs-prior statistics use ONLY the classic models WITHOUT observer
+    features; the with-observer models are labelled as our framework and never change the prior comparison."""
+    from cosmic import compare
+    from cosmic.evaluation import evaluate_all
+    pred = _synthetic_predictions(with_observer_boost=0.5)                # with-observer models are much better
+    cfg = _compare_cfg(tmp_path, pred)
+    comp = compare.run(cfg)
+    prior = comp[comp["role"] == "prior approach"]
+    assert set(prior["variant"]) == {"without_observer"} and set(prior["model"]) == {"NB", "DT", "RF", "LR"}
+    fw = comp[comp["role"] == "our framework on a classic model"]
+    assert set(fw["variant"]) == {"with_observer"} and not fw["display_name"].str.contains("without").any()
+    assert set(comp.loc[comp["role"] == "proposed", "variant"]) == {"full"}
+    pvp = pd.read_csv(os.path.join(cfg.output_dir, "prior_vs_proposed_paired.csv"))
+    assert set(pvp["prior_model"]) == {"NB", "DT", "RF", "LR"}
+    # changing the with-observer predictions does not move the prior-vs-proposed statistics at all
+    per_seed = evaluate_all(pred)
+    pred2 = pred.copy()
+    wo = pred2["variant"] == "with_observer"
+    pred2.loc[wo, "prob"] = 1 - pred2.loc[wo, "prob"]
+    a = compare.prior_vs_proposed(per_seed, "window")
+    b = compare.prior_vs_proposed(evaluate_all(pred2), "window")
+    pd.testing.assert_frame_equal(a, b)
+    gain = pd.read_csv(os.path.join(cfg.output_dir, "observer_feature_gain.csv"))
+    g = gain[(gain["level"] == "window") & (gain["metric"] == "mcc")]
+    assert (g["with_mean"] > g["without_mean"]).all()                      # the boost shows up only here
+    md = open(os.path.join(cfg.output_dir, "COMPARISON.md"), encoding="utf-8").read()
+    assert "not prior approaches" in md
+
+
+def test_paired_wilcoxon_matches_scipy():
+    from scipy.stats import wilcoxon
+    from cosmic.compare import paired, wilcoxon_p
+    d = np.array([0.10, 0.05, -0.02, 0.08, 0.12, 0.03, 0.07, -0.01, 0.09, 0.04])
+    assert wilcoxon_p(d) == pytest.approx(wilcoxon(d).pvalue)
+    assert math.isnan(wilcoxon_p(np.zeros(10))) and math.isnan(wilcoxon_p([0.1]))
+    ps = pd.DataFrame([dict(model=m, variant="v", level="window", seed=s, mcc=b + (d[s - 1] if m == "A" else 0),
+                            roc_auc=0.8, pr_auc=0.7, kappa=0.5, brier=0.2 - (0.01 if m == "A" else 0))
+                       for m, b in (("A", 0.5), ("B", 0.5)) for s in range(1, 11)])
+    r = paired(ps, ("A", "v"), ("B", "v"), "window").set_index("metric")
+    assert r.loc["mcc", "mean_difference"] == pytest.approx(d.mean()) and r.loc["mcc", "seeds_ahead"] == 8
+    assert r.loc["brier", "seeds_ahead"] == 10                              # lower Brier counts as ahead
+    assert r.loc["mcc", "wilcoxon_p"] == pytest.approx(wilcoxon(d).pvalue)
 
 
 # ---------------------------------------------------------------- dataset audit (synthetic, no Spark)
@@ -619,17 +684,19 @@ def test_no_matplotlib_or_seaborn_anywhere():
 
 def test_plotly_figure_saved_as_html_json_and_png_or_logged(tmp_path):
     from cosmic import plots
-    pdf = pd.DataFrame({"jd": [2460000.0, 2460001.0, 2460002.0], "mag": [10.0, 11.0, 10.5],
-                        "mag_norm": [-0.5, 0.5, 0.0], "band": ["V"] * 3, "observer": ["A", "B", "A"]})
-    plots.lightcurve_before_after(pdf, "X", ["A", "B"], str(tmp_path))
-    base = tmp_path / "fig_lightcurve_before_after"
-    assert (tmp_path / (base.name + ".html")).exists() and (tmp_path / (base.name + ".json")).exists()
+    d = pd.DataFrame({"jd": [2460000.0, 2460001.0, 2460002.0], "mag": [10.0, 11.0, 10.5], "band": ["V"] * 3,
+                      "observer": ["A", "B", "A"], "A_k": [0.9, 0.3, 0.9]})
+    fig, cap = plots.lightcurve_ak(d, "X")
+    plots.save(fig, str(tmp_path), "04_lightcurve_ak")
+    base = "04_lightcurve_ak"
+    assert (tmp_path / (base + ".html")).exists() and (tmp_path / (base + ".json")).exists()
     log = pd.read_csv(tmp_path / "figure_export_log.csv")
-    assert list(log["figure"]) == [base.name]
-    assert (tmp_path / (base.name + ".png")).exists() == bool(log["png"].iloc[0])   # PNG or a logged failure
+    assert list(log["figure"]) == [base]
+    assert (tmp_path / (base + ".png")).exists() == bool(log["png"].iloc[0])   # PNG or a logged failure
     import plotly.io as pio
-    fig = pio.read_json(str(tmp_path / (base.name + ".json")))
-    assert fig.layout.yaxis.autorange == "reversed" and fig.layout.yaxis2.autorange == "reversed"
+    f = pio.read_json(str(tmp_path / (base + ".json")))
+    assert f.layout.yaxis.autorange == "reversed"                               # brighter = up
+    assert cap.startswith("Inference:") and "3 cleaned observations" in cap
 
 
 def test_architecture_dot_has_windowing_and_rganet():
@@ -914,13 +981,285 @@ def test_vizier_falls_back_to_a_mirror(monkeypatch):
 
 
 def test_field_ranking_without_vizier(monkeypatch):
-    from cosmic import vizier as vz
+    from cosmic import vsx
     from cosmic import ztf
     from cosmic.config import load_config
 
     def unreachable(*a, **k):
-        raise RuntimeError("No VizieR server answered (x)")
+        raise RuntimeError("No VSX backend answered (synthetic test)")
 
-    monkeypatch.setattr(vz, "pick_server", unreachable)
+    monkeypatch.setattr(vsx, "backend", unreachable)
     centres = pd.DataFrame({"field": [1, 2], "ra": [10.0, 20.0], "dec": [5.0, 6.0]})
     assert ztf.vsx_richness(load_config("synthetic"), centres, 3.5) is None    # caller ranks by distance instead
+
+
+# ---------------------------------------------------------------- Phase 3 metrics (MCC, kappa, Brier, thresholds)
+def test_mcc_kappa_brier_by_hand_and_against_sklearn():
+    from cosmic.evaluation import at_threshold, brier, choose_threshold, kappa_from, mcc_from
+    # tp=3, fp=1, fn=1, tn=5: MCC = (15 - 1) / sqrt(4 * 4 * 6 * 6) = 14 / 24
+    assert mcc_from(3, 1, 1, 5) == pytest.approx(14 / 24)
+    # po = 0.8, pe = (4*4 + 6*6) / 100 = 0.52 -> kappa = 0.28 / 0.48
+    assert kappa_from(3, 1, 1, 5) == pytest.approx(0.28 / 0.48)
+    assert mcc_from(5, 0, 0, 0) == 0.0                                       # undefined -> 0, never NaN
+    assert brier([1, 0, 1], [0.8, 0.3, 0.4]) == pytest.approx((0.04 + 0.09 + 0.36) / 3)
+    y = np.array([1, 1, 1, 0, 0, 0, 0, 0])
+    p = np.array([0.9, 0.7, 0.35, 0.6, 0.3, 0.2, 0.1, 0.05])
+    t = choose_threshold(y, p)
+    # t = 0.35: tp 3, fp 1, fn 0, tn 4 -> MCC 12 / sqrt(240) = 0.775 beats t = 0.7 (10 / sqrt(180) = 0.745)
+    assert t == pytest.approx(0.35)
+    try:
+        from sklearn.metrics import brier_score_loss, cohen_kappa_score, matthews_corrcoef
+    except ImportError:
+        return
+    r = np.random.default_rng(5)
+    yy, pp = r.integers(0, 2, 400), r.random(400)
+    for thr in (0.3, 0.5, 0.71):
+        m = at_threshold(yy, pp, thr)
+        pred = (pp >= thr).astype(int)
+        assert m["mcc"] == pytest.approx(matthews_corrcoef(yy, pred))
+        assert m["kappa"] == pytest.approx(cohen_kappa_score(yy, pred))
+    assert brier(yy, pp) == pytest.approx(brier_score_loss(yy, pp))
+    # the chosen threshold really maximises MCC over every candidate threshold
+    best = max(matthews_corrcoef(yy, (pp >= c).astype(int)) for c in np.unique(pp))
+    assert at_threshold(yy, pp, choose_threshold(yy, pp))["mcc"] == pytest.approx(best)
+
+
+def test_evaluate_reports_five_metrics_at_both_levels():
+    from cosmic.evaluation import METRICS, evaluate_all, mean_std
+    pred = _synthetic_predictions(seeds=(1, 2))
+    per_seed = evaluate_all(pred)
+    assert set(per_seed["level"]) == {"window", "star"}
+    for m in METRICS + ["threshold", "tp", "fp", "fn", "tn"]:
+        assert per_seed[m].notna().all(), m
+    star = per_seed[per_seed["level"] == "star"]
+    assert (star["n_test"] == 8).all()                                       # 8 test stars per seed
+    ms = mean_std(per_seed)
+    assert (ms["seeds"] == 2).all() and ms["mcc"].str.contains(" ± ").all()
+
+
+# ---------------------------------------------------------------- leakage
+def test_leakage_rganet_statistics_and_augmentation_use_training_windows_only(tmp_path, monkeypatch):
+    import torch
+    from cosmic import rganet
+    from cosmic.config import load_config
+    _toy_windows(tmp_path)
+    data = rganet.load_windows(str(tmp_path))
+    split = pd.read_csv(tmp_path / "splits.csv").query("seed == 1")
+    p = dict(load_config("synthetic").section("rganet"), d_model=16, heads=2, layers=1, max_epochs=2, patience=2,
+             batch_size=16)
+    calls = []
+    real = rganet.augment
+    monkeypatch.setattr(rganet, "augment", lambda xb, *a, **k: (calls.append(len(xb["mask"])), real(xb, *a, **k))[1])
+    save = tmp_path / "m.pt"
+    rganet.train_one(data, split, "no_pretrain", 1, p, torch.device("cpu"), log=lambda *_: None, save_path=str(save))
+    _, meta = rganet.load_model(str(save))
+    n_train = int(np.isin(data["auid"], split.loc[split["set"] == "train", "auid"]).sum())
+    assert calls and sum(calls) == 2 * n_train                               # augmentation saw train windows only
+    # token statistics come from the training windows only: change every val/test token -> identical statistics
+    other = ~np.isin(data["auid"], split.loc[split["set"] == "train", "auid"])
+    data2 = dict(data, num=data["num"].copy())
+    data2["num"][other] += 100.0
+    rganet.train_one(data2, split, "no_pretrain", 1, p, torch.device("cpu"), log=lambda *_: None, save_path=str(save))
+    _, meta2 = rganet.load_model(str(save))
+    assert np.allclose(meta["mean"], meta2["mean"]) and np.allclose(meta["std"], meta2["std"])
+
+
+def test_leakage_ztf_windows_only_ever_train_the_ml_models(spark, windowed):
+    from cosmic.classify import fit_predict
+    from cosmic.splits import make_splits
+    feats = windowed["feats"]
+    lab = feats.dropna(subset=["label"]).drop_duplicates("auid")[["auid", "label"]].astype({"label": int})
+    sp = make_splits(lab, [1])
+    z = feats.dropna(subset=["label"]).head(40).copy()
+    z["auid"] = "ZTF" + z["auid"]; z["window_id"] = "ZTF" + z["window_id"]
+    c = dict(dt_max_depth=[3], dt_min_instances=[1], rf_num_trees=[5], rf_max_depth=[3], lr_reg_param=[0.01],
+             lr_elastic_net=[0.0], lr_max_iter=30, data_settings=["aavso", "aavso_ztf"])
+    sdf = lambda d: spark.createDataFrame(d.astype(object).where(d.notna(), None))  # noqa: E731
+    pred, chosen = fit_predict(sdf(feats), spark.createDataFrame(sp), c, [1], ztf=sdf(z))
+    assert not pred["auid"].str.startswith("ZTF").any()                      # never in validation or test
+    assert set(pred["data_setting"]) <= {"aavso", "aavso_ztf"}
+    ztf_runs = chosen[chosen["data_setting"] == "aavso_ztf"]
+    assert (ztf_runs["n_train_ztf"] == 40).all() and (chosen.loc[chosen["data_setting"] == "aavso", "n_train_ztf"] == 0).all()
+    for s in ("val", "test"):
+        assert set(pred.loc[pred["set"] == s, "auid"]) <= set(sp.loc[sp["set"] == s, "auid"])
+
+
+def test_leakage_ztf_objects_near_aavso_stars_are_flagged_and_match_radius(spark):
+    from cosmic.ztf_spark import match_labels
+    a = 1 / 3600
+    spark.createDataFrame(pd.DataFrame({
+        "objectid": [1, 2, 3, 4], "field": 1, "filter": "zr",
+        "objra": [10.0, 10.0 + 1.5 * a, 50.0 + 3 * a, 80.0], "objdec": [20.0, 20.0, -5.0, 60.0 + 1 * a]})) \
+        .createOrReplaceTempView("t_obj")
+    spark.createDataFrame(pd.DataFrame({"name": ["V1", "V2", "V3"], "ra": [10.0, 50.0, 80.0], "dec": [20.0, -5.0, 60.0],
+                                        "type": ["UGSS", "M", "EA"], "primary_type": ["UGSS", "M", "EA"],
+                                        "label": [1, 0, 0]})).createOrReplaceTempView("t_vsx")
+    spark.createDataFrame(pd.DataFrame({"auid": ["000-AAA-001"], "ra": [80.0], "dec": [60.0]})) \
+        .createOrReplaceTempView("t_aav")
+    out = match_labels(spark, "t_obj", "t_vsx", "t_aav", 2.0, 10.0).toPandas().set_index("objectid")
+    assert sorted(out.index) == [1, 2, 4]                                    # object 3 is 3" away: no label
+    assert out.loc[1, "vsx_name"] == "V1" and out.loc[2, "vsx_name"] == "V1" and out.loc[2, "sep_arcsec"] == pytest.approx(1.5 * np.cos(np.radians(20)), abs=0.01)  # RA offset x cos(dec)
+    assert out.loc[4, "aavso_overlap"] and not out.loc[1, "aavso_overlap"]     # 1" from an AAVSO star -> excluded
+
+
+# ---------------------------------------------------------------- Phase 4: captions, DATA_FLOW, dashboard dictionary
+def _caption_inputs():
+    raw = pd.DataFrame({"jd": [1.0, 2.0], "mag": [10.0, 11.0], "fainterthan": [False, False]})
+    clean = pd.DataFrame({"jd": [1.0, 2.0], "mag": [10.0, 11.0], "mag_norm": [-0.5, 0.5], "A_k": [0.9, 0.4]})
+    dq = pd.DataFrame([dict(dataset="AAVSO", stage="before", size_mb=10.0, rows=100, nulls=3, duplicates=2, flagged=1,
+                            bands=3, stars=5, observers=4),
+                       dict(dataset="AAVSO", stage="after", size_mb=4.0, rows=80, nulls=0, duplicates=0, flagged=0,
+                            bands=3, stars=5, observers=4)])
+    steps = {"AAVSO": pd.DataFrame({"step": ["0 raw", "1 dedup", "2 thin"], "rows": [100, 95, 80]})}
+    scores = pd.DataFrame({"observer": list("ABCDEF"), "obs_type": ["CCD", "CCD", "Visual", "Visual", "DSLR", "CCD"],
+                           "score": [0.9, 0.8, 0.4, 0.5, 0.6, 0.7], "low_n": [False] * 5 + [True]})
+    per_obs = pd.DataFrame({"observer": list("ABCD"), "A_k": [0.9, 0.7, 0.5, 0.3], "scatter_vs_ztf_mag": [0.05, 0.1, 0.2, 0.3],
+                            "n_matched": [20, 30, 40, 50], "low_n": [False] * 4})
+    summ = dict(spearman_rho=-1.0, p_value=0.0, observers=4, matched_observations=140, enough_to_conclude=False)
+    comp = pd.DataFrame({"source": ["AAVSO", "AAVSO", "ZTF"], "class": ["anomalous", "unlabelled", "normal"],
+                         "vsx_type": ["UGSS", None, "M"], "rows": [50, 10, 70]})
+    return raw, clean, dq, steps, scores, per_obs, summ, comp
+
+
+def test_every_chart_has_a_generated_inference_caption():
+    from cosmic import plots
+    raw, clean, dq, steps, scores, per_obs, summ, comp = _caption_inputs()
+    lc = pd.DataFrame({"jd": [1.0, 2.0, 3.0], "mag": [10.0, 10.5, 11.0], "band": ["V", "V", "B"],
+                       "observer": ["A", "B", "A"], "A_k": [0.9, 0.3, 0.9]})
+    caps = [plots.caption_samples(raw, clean, "AAVSO"), plots.data_quality(dq)[1], plots.cleaning_sankey(steps)[1],
+            plots.lightcurve_ak(lc, "X")[1], plots.ak_violin(scores)[1], plots.ak_validation(per_obs, summ)[1],
+            plots.composition_sunburst(comp)[1]]
+    for c in caps:
+        assert c.startswith("Inference: ") and len(c) > 40, c
+    assert "No nulls or duplicates remain" in caps[1]                        # data-driven, not a fixed sentence
+    assert "too few to conclude" in caps[5]                                  # small overlap is said, not hidden
+
+
+def test_report_makes_figures_and_captions_from_saved_files_and_retires_v2(tmp_path):
+    import json
+    from cosmic import compare, report
+    cfg = _compare_cfg(tmp_path, _synthetic_predictions())
+    compare.run(cfg)
+    out = cfg.output_dir
+    for f in ("fig_comparison_metrics.png", "fig_obs_per_star.html", "comparison_table_star_level.csv"):  # v2 leftovers
+        open(os.path.join(out, f), "w").close()
+    report.run(cfg)
+    caps = json.load(open(os.path.join(out, "figure_captions.json"), encoding="utf-8"))
+    for name in ("08_comparison_table", "09_prior_vs_proposed", "10_radar", "11_observer_feature_dumbbell",
+                 "12_ablation", "13_confusion_grid"):
+        assert caps[name]["caption"].startswith("Inference:"), name
+        assert os.path.exists(os.path.join(cfg.figures_dir, name + ".json"))
+    fig09 = open(os.path.join(cfg.figures_dir, "09_prior_vs_proposed.json"), encoding="utf-8").read()
+    assert "dtype" not in fig09 and "without observer features" in fig09     # one clean row per prior approach
+    md = open(os.path.join(out, "figure_captions.md"), encoding="utf-8").read()
+    assert "Not made (input missing)" in md and "02_data_quality" in md       # missing inputs are listed, never faked
+    assert not [f for f in os.listdir(out) if f.startswith("fig_")]           # old v2 charts moved away...
+    assert sorted(os.listdir(os.path.join(out, "retired_v2"))) == ["comparison_table_star_level.csv",
+                                                                   "fig_comparison_metrics.png", "fig_obs_per_star.html"]
+    assert os.path.exists(os.path.join(out, "DATA_FLOW.txt"))
+
+
+def test_data_flow_is_generated_from_recorded_measurements(tmp_path):
+    from cosmic import dataflow
+    from cosmic.config import load_config
+    cfg = load_config("synthetic", [f"datasets.synthetic.project_root={tmp_path}",
+                                    f"datasets.synthetic.output_subdir={tmp_path / 'out'}"])
+    dataflow.record(cfg, "ztf_clean", "Spark cleans the arrays.", "HDFS /x", "Parquet", "Spark SQL",
+                    size_bytes=5 * 2 ** 30 + 1, rows=123456789, files=7, compression="raw 8.5 GB -> clean 5.0 GB",
+                    changes="epochs removed", seconds=42.04, extra={"counting pass": "10 s"})
+    dataflow.record(cfg, "aavso_source", "CSV files.", "/data", "CSV", "manual", size_bytes=2048, rows=10)
+    dataflow.record_timing(cfg, "ztf_clean", 42.04, "Spark (yarn)")
+    dataflow.record_timing(cfg, "rganet", 7.0, "plain Python + PyTorch")
+    dataflow.record_timing(cfg, "ztf_clean", 40.0, "Spark (yarn)")            # a rerun replaces the old time
+    text = open(dataflow.write(cfg), encoding="utf-8").read()
+    assert "[07] ZTF cleaned light curves" in text and "Size         : 5.00 GB" in text
+    assert "Rows         : 123,456,789" in text and "Time taken   : 42.0 s" in text and "counting pass" in text
+    assert "Size         : 2.00 KB" in text
+    assert text.count("not run yet") == len(dataflow.STAGES) - 2             # nothing typed by hand
+    assert "STEP TIMINGS" in text and "ztf_clean" in text and "47.0 s" in text  # 40.0 + 7.0
+    with pytest.raises(KeyError):
+        dataflow.record(cfg, "no_such_stage", "", "", "", "")
+
+
+# ---------------------------------------------------------------- fresh machine, notebook, no bar charts
+def test_fresh_machine_plans_the_ztf_steps(monkeypatch, tmp_path):
+    from cosmic.config import load_config
+    from cosmic.pipeline import plan_steps
+    plan = [s for s, _ in plan_steps(["akval"], lambda t: False)]
+    assert plan.index("ingest") < plan.index("preprocess") < plan.index("score") < plan.index("akval")
+    assert plan.index("ztf_clean") < plan.index("akval")
+    plan = [s for s, _ in plan_steps(["ztf_windows"], lambda t: False)]
+    assert plan.index("ztf_clean") < plan.index("ztf_label") < plan.index("ztf_windows")
+    have = {"observations_raw", "star_labels", "obs_clean", "ztf_lightcurves_clean", "ztf_labels"}
+    assert [s for s, _ in plan_steps(["ztf_windows"], lambda t: t in have)] == ["ztf_windows"]
+    # on a fresh machine every path comes from PROJECT_ROOT; the non-Spark steps read only V3_ROOT/work files
+    monkeypatch.setenv("COSMIC_PROJECT_ROOT", str(tmp_path / "proj"))
+    monkeypatch.delenv("V3_ROOT", raising=False)
+    cfg = load_config("real")
+    for p in (cfg.work_dir, cfg.output_dir, cfg.figures_dir, cfg.dashboard_dir, cfg.clean_dir, cfg.ztf_raw_dir):
+        assert p.startswith(str(tmp_path / "proj" / "v3_5GB")), p
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for f in ("rganet.py", "compare.py", "report.py", "dataflow.py", "plots.py", "evaluation.py"):
+        assert "/content" not in open(os.path.join(root, "src", "cosmic", f), encoding="utf-8").read(), f
+
+
+def test_local_hdfs_stand_in(tmp_path, monkeypatch):
+    from cosmic import spark_session
+    monkeypatch.setenv("COSMIC_LOCAL_FS_ROOT", str(tmp_path / "fs"))
+    src = tmp_path / "a.csv"; src.write_text("x\n")
+    spark_session.hdfs("-mkdir", "-p", "/c/raw")
+    spark_session.hdfs("-put", "-f", str(src), "/c/raw/")
+    assert (tmp_path / "fs" / "c" / "raw" / "a.csv").read_text() == "x\n"
+    assert "a.csv" in spark_session.hdfs("-ls", "-R", "-h", "/c/raw")
+    spark_session.hdfs("-rm", "-r", "-f", "-skipTrash", "/c/raw")
+    assert not (tmp_path / "fs" / "c" / "raw").exists()
+
+
+def _notebook(tmp_path):
+    import build_notebook
+    nb = build_notebook.build(str(tmp_path / "nb.ipynb"))
+    return build_notebook, nb, ["".join(c["source"]) for c in nb["cells"]]
+
+
+def test_notebook_runs_every_step_in_order_and_ends_with_the_results(tmp_path):
+    import json
+    import re
+    bn, nb, src = _notebook(tmp_path)
+    json.loads(open(tmp_path / "nb.ipynb", encoding="utf-8").read())          # valid JSON notebook
+    for c in nb["cells"]:
+        if c["cell_type"] == "code":
+            body = "\n".join(l for l in "".join(c["source"]).split("\n") if not l.lstrip().startswith(("!", "%")))
+            compile(body, "cell", "exec")                                     # every Python cell compiles
+    steps = [s for cell in src for m in re.findall(r"run\.py ([a-z_+]+)", cell) for s in m.split("+")]
+    order = ["ztf_download", "ztf_audit", "audit", "architecture", "ingest", "preprocess", "score", "features",
+             "ztf_ingest", "ztf_clean", "ztf_label", "windows", "ztf_windows", "akval", "cluster", "classify", "rganet",
+             "infer", "compare", "dashboard", "report"]
+    pos = [steps.index(s) for s in order]
+    assert pos == sorted(pos), steps
+    first_results = next(i for i, s in enumerate(src) if s.startswith(f"# {bn.RESULTS_TITLE}"))
+    results = src[first_results:]
+    assert not any("run.py" in s for s in results)                           # results only read saved files
+    assert results[-1].rstrip().endswith('print("ALL RESULTS SHOWN")')
+    for group in bn.FIGURES:
+        for name in group:
+            assert any(name in s for s in results), name
+    assert len(bn.FIGURES) == 13
+
+
+def test_no_bar_charts_histograms_or_v2_results_anywhere(tmp_path):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bad = ("go.Bar(", "px.bar(", "go.Histogram(", "px.histogram(", "go.Funnel(", "barmode")
+    hits = []
+    for d in ("src", "scripts"):
+        for dirpath, _, files in os.walk(os.path.join(root, d)):
+            for f in files:
+                if f.endswith(".py"):
+                    text = open(os.path.join(dirpath, f), encoding="utf-8").read()
+                    hits += [f"{f}: {b}" for b in bad if b in text]
+    assert hits == []
+    _, _, src = _notebook(tmp_path)
+    for old in ("fig_comparison_metrics", "fig_obs_per_star", "fig_observer_score_hist", "fig_preprocessing_funnel",
+                "fig_scalability", "comparison_table_star_level", "ml_observer_features_table", "rganet_learned_lambda"):
+        assert not any(old in s for s in src), old
+    committed = json.load(open(os.path.join(root, "notebooks", "cosmic_colab.ipynb"), encoding="utf-8"))
+    assert ["".join(c["source"]) for c in committed["cells"]] == src           # committed notebook is up to date

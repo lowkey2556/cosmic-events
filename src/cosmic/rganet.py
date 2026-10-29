@@ -19,8 +19,8 @@ Training:
      Training-only augmentation: observation dropout, a random time shift, magnitude noise scaled by each
      observation's uncertainty. Class-weighted BCE, AdamW, gradient clipping, early stopping on the
      validation AUPRC (best epoch kept).
-  3. A small grid (learning rate x dropout x hybrid head) is judged on ONE split's validation stars
-     (rganet.grid_seed) for the full model; the chosen setting is used for every variant and every seed.
+  3. A small grid (learning rate x dropout x hybrid head) is judged separately on EACH split's validation
+     stars for the full model; the chosen setting is shared by the variants within that split only.
 Ablations (same splits, seeds and settings):
     full            pre-trained + gate
     no_pretrain     gate, trained from scratch on AAVSO only
@@ -380,8 +380,8 @@ def pretrain(cfg, p, device, kind):
     keys = ("d_model", "heads", "layers", "ff_mult", "dropout", "n_time_freqs", "time_min_period_days",
             "time_max_period_days", "band_emb", "type_emb", "eps", "weight_decay", "grad_clip", "pretrain_epochs",
             "pretrain_lr", "pretrain_batch_size", "pretrain_patience", "augment")
-    stamp = f"{os.path.getsize(src)}-{int(os.path.getmtime(src))}-" + json.dumps({k: p.get(k) for k in keys},
-                                                                                  sort_keys=True, default=str)
+    stamp = json.dumps([file_digest(src), file_digest(os.path.join(cfg.work_dir, "vocab.json")),
+                        file_digest(__file__), {k: p.get(k) for k in keys}], sort_keys=True, default=str)
     if os.path.exists(path):
         blob = torch.load(path, map_location="cpu", weights_only=False)
         if blob["meta"].get("stamp") == stamp:
@@ -422,14 +422,16 @@ def load_matching(model, state):
 
 
 # ------------------------------------------------------------------ 2. fine-tuning on AAVSO
-def train_one(data, split, variant, seed, p, device, pre=None, hybrid=False, log=print, save_path=None):
+def train_one(data, split, variant, seed, p, device, pre=None, hybrid=False, log=print, save_path=None,
+              evaluate_test=True):
     """Fine-tune (or, for no_pretrain, train from scratch) one variant on one split. All layers are trained; the
     gate is active for 'full' and 'no_pretrain'. Returns (val/test predictions, history, run info)."""
     v = VARIANT[variant]
     set_seed(seed)
     names_all = list(data["feature_names"])
     names = [names_all[i] for i in kept_features(names_all, v["blind"])]
-    sets = {s: np.flatnonzero(np.isin(data["auid"], split.loc[split["set"] == s, "auid"])) for s in ("train", "val", "test")}
+    set_names = ("train", "val", "test") if evaluate_test else ("train", "val")
+    sets = {s: np.flatnonzero(np.isin(data["auid"], split.loc[split["set"] == s, "auid"])) for s in set_names}
     y = data["label"].astype(np.float32)
     if pre is not None:  # the pre-training token statistics: the encoder sees inputs on the scale it learned
         mean, std = np.asarray(pre["meta"]["mean"]), np.asarray(pre["meta"]["std"])
@@ -466,14 +468,14 @@ def train_one(data, split, variant, seed, p, device, pre=None, hybrid=False, log
         save_model(save_path, model, meta)
     mean_t, std_t = torch.as_tensor(mean, dtype=torch.float32), torch.as_tensor(std, dtype=torch.float32)
     preds = []
-    for s in ("val", "test"):
+    for s in (("val", "test") if evaluate_test else ("val",)):
         idx = sets[s]
         preds.append(pd.DataFrame(dict(set=s, window_id=data["window_id"][idx], auid=data["auid"][idx],
                                        label=data["label"][idx].astype(int),
                                        prob=predict(model, X[s], mean_t, std_t, device))))
     info = dict(best_epoch=best_epoch, epochs_run=len(hist), best_val_pr_auc=best_ap, train_seconds=round(train_s, 1),
                 parameters=sum(p_.numel() for p_ in model.parameters()), n_train=len(sets["train"]),
-                n_val=len(sets["val"]), n_test=len(sets["test"]), pretrained=pre is not None,
+                n_val=len(sets["val"]), n_test=len(sets.get("test", [])), pretrained=pre is not None,
                 pretrained_tensors_loaded=loaded[0], hybrid_head=bool(hybrid), lr=float(p["lr"]),
                 dropout=float(p["dropout"]), **model.lambdas())
     log(f"  {variant:15s} seed {seed}: best epoch {best_epoch}/{len(hist)}, val AUPRC {best_ap:.3f}, {train_s:.0f} s"
@@ -487,11 +489,32 @@ def device_info():
     return torch.device("cpu"), "no GPU found - training on CPU (slower; same results up to floating-point noise)"
 
 
-def choose_config(cfg, data, splits, p, device, pres):
-    """Small grid (lr x dropout x hybrid head) for the full model, judged ONLY on the validation stars of split
-    rganet.grid_seed; the chosen setting is used for every variant and seed. Saved to rganet_grid.csv (resumable)."""
-    g, gseed = p["grid"], int(p["grid_seed"])
-    path = os.path.join(cfg.work_dir, "rganet_grid.csv")
+def file_digest(path):
+    """Content identity for cached training inputs; size/mtime alone can reuse stale models."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def training_signature(cfg):
+    """Invalidate completed runs and tuning when data, splits, vocabulary or training code changes."""
+    files = [os.path.join(cfg.work_dir, f) for f in
+             ("windows_seq.npz", "ztf_windows_seq.npz", "splits.csv", "vocab.json")]
+    files.append(__file__)
+    return hashlib.sha256(json.dumps([file_digest(p) for p in files]).encode()).hexdigest()
+
+
+def choose_config(cfg, data, split, p, device, pres, seed, signature):
+    """Tune on this seed's train/validation stars only; other splits must never select its settings."""
+    g, gseed = p["grid"], int(seed)
+    split = split[split["seed"] == gseed]
+    tune_split = split[split["set"] != "test"].copy()
+    stamp = hashlib.sha256(json.dumps([signature, p, gseed], sort_keys=True, default=str).encode()).hexdigest()[:16]
+    grid_dir = os.path.join(cfg.work_dir, "rganet_grids", stamp)
+    os.makedirs(grid_dir, exist_ok=True)
+    path = os.path.join(grid_dir, f"seed{gseed}.csv")
     combos = [dict(lr=float(lr), dropout=float(dr), hybrid_head=bool(hh))
               for lr in g["lr"] for dr in g["dropout"] for hh in g["hybrid_head"]]
     old = pd.read_csv(path) if os.path.exists(path) else None
@@ -503,8 +526,9 @@ def choose_config(cfg, data, splits, p, device, pres):
             rows.append({k: v for k, v in hit.iloc[0].to_dict().items() if k != "chosen"})
             continue
         pc = dict(p, lr=c["lr"], dropout=c["dropout"])
-        _, _, info = train_one(data, splits[splits["seed"] == gseed], "full", gseed, pc, device, pre=pres["full"],
-                               hybrid=c["hybrid_head"], log=lambda m: print("  grid" + m, flush=True))
+        _, _, info = train_one(data, tune_split, "full", gseed, pc, device, pre=pres["full"],
+                               hybrid=c["hybrid_head"], log=lambda m: print("  grid" + m, flush=True),
+                               evaluate_test=False)
         rows.append(dict(c, val_pr_auc=info["best_val_pr_auc"], best_epoch=info["best_epoch"],
                          train_seconds=info["train_seconds"], grid_seed=gseed))
         pd.DataFrame(rows).to_csv(path, index=False)
@@ -513,11 +537,10 @@ def choose_config(cfg, data, splits, p, device, pres):
     best = grid["val_pr_auc"].idxmax()
     grid.loc[best, "chosen"] = True
     grid.to_csv(path, index=False)
-    grid.to_csv(os.path.join(cfg.output_dir, "rganet_grid.csv"), index=False)
     b = grid.loc[best]
     print(f"chosen on validation (seed {gseed}): lr {b['lr']:g}, dropout {b['dropout']:g}, "
           f"hybrid head {bool(b['hybrid_head'])} (val AUPRC {b['val_pr_auc']:.3f})")
-    return dict(lr=float(b["lr"]), dropout=float(b["dropout"])), bool(b["hybrid_head"])
+    return dict(lr=float(b["lr"]), dropout=float(b["dropout"])), bool(b["hybrid_head"]), grid
 
 
 def run(cfg, variants=None, seeds=None):
@@ -532,31 +555,41 @@ def run(cfg, variants=None, seeds=None):
     print(f"RGA-Net on {msg}; {len(data['label'])} AAVSO windows; variants {variants}; seeds {seeds}")
     kinds = sorted({VARIANT[v]["pretrained"] for v in variants + ["full"] if VARIANT[v]["pretrained"]})
     pres = {k: pretrain(cfg, p, device, k) for k in kinds}
+    signature = training_signature(cfg)
     pd.DataFrame([dict(encoder=k, **{m: pres[k]["meta"][m] for m in ("best_epoch", "holdout_pr_auc", "seconds",
                                                                        "n_train", "n_holdout")}) for k in kinds]) \
         .to_csv(os.path.join(cfg.output_dir, "rganet_pretraining.csv"), index=False)
-    best, hybrid = choose_config(cfg, data, splits, p, device, pres)
-    p.update(best)
-    tag = hashlib.md5(json.dumps([p, hybrid], sort_keys=True, default=str).encode()).hexdigest()[:8]
-    run_dir = os.path.join(cfg.work_dir, "rganet_runs", tag)
     model_dir = os.path.join(cfg.work_dir, "models")
-    os.makedirs(run_dir, exist_ok=True)
     os.makedirs(model_dir, exist_ok=True)
     preds, hists, runs = [], [], []
+    grids = []
     for seed in seeds:
         split = splits[splits["seed"] == seed]
+        best, hybrid, grid = choose_config(cfg, data, split, p, device, pres, seed, signature)
+        pc = dict(p, **best)
+        grids.append(grid)
+        grid = pd.concat(grids, ignore_index=True)
+        grid.to_csv(os.path.join(cfg.work_dir, "rganet_grid.csv"), index=False)
+        grid.to_csv(os.path.join(cfg.output_dir, "rganet_grid.csv"), index=False)
+        tag = hashlib.sha256(json.dumps([signature, pc, hybrid, int(seed)], sort_keys=True,
+                                        default=str).encode()).hexdigest()[:16]
+        run_dir = os.path.join(cfg.work_dir, "rganet_runs", tag)
+        os.makedirs(run_dir, exist_ok=True)
         for v in variants:
             base = os.path.join(run_dir, f"{v}_seed{seed}")
             mpath = os.path.join(model_dir, f"rganet_{v}_seed{seed}.pt")
+            reusable = False
             if all(os.path.exists(base + e) for e in ("_pred.csv", "_hist.csv", "_info.json")) and os.path.exists(mpath):
-                pr, h = pd.read_csv(base + "_pred.csv"), pd.read_csv(base + "_hist.csv")
                 with open(base + "_info.json") as fh:
                     info = json.load(fh)
+                reusable = info.get("checkpoint_sha256") == file_digest(mpath)
+            if reusable:
+                pr, h = pd.read_csv(base + "_pred.csv"), pd.read_csv(base + "_hist.csv")
                 print(f"  {v:15s} seed {seed}: reused (finished earlier)")
             else:
                 pre = pres[VARIANT[v]["pretrained"]] if VARIANT[v]["pretrained"] else None
-                pr, h, info = train_one(data, split, v, seed, p, device, pre=pre, hybrid=hybrid, save_path=mpath)
-                info = dict(variant=v, seed=seed, device=str(device), **info)
+                pr, h, info = train_one(data, split, v, seed, pc, device, pre=pre, hybrid=hybrid, save_path=mpath)
+                info = dict(variant=v, seed=seed, device=str(device), checkpoint_sha256=file_digest(mpath), **info)
                 pr.to_csv(base + "_pred.csv", index=False)
                 h.to_csv(base + "_hist.csv", index=False)
                 with open(base + "_info.json", "w") as fh:
@@ -581,6 +614,6 @@ def run(cfg, variants=None, seeds=None):
                     "every variant on every split's AAVSO training stars; best-epoch weights are saved.", model_dir,
                     "PyTorch .pt (weights + statistics)", f"PyTorch on {device}",
                     size_bytes=sum(os.path.getsize(f) for f in files), rows=len(pred), files=len(files),
-                    changes=f"{len(runs)} fine-tuned models; chosen lr {p['lr']:g}, dropout {p['dropout']:g}, "
-                            f"hybrid head {hybrid}", seconds=float(runs["train_seconds"].sum()))
+                    changes=f"{len(runs)} fine-tuned models; settings chosen separately on each split's validation stars",
+                    seconds=float(runs["train_seconds"].sum()))
     return pred, hist, runs

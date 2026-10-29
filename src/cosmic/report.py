@@ -24,6 +24,27 @@ from . import dataflow, plots
 from .evaluation import LABELS, METRICS
 
 ORDER = ["NB", "DT", "RF", "LR", "RGA-Net"]
+# Review 2 (v2) result files that the current pipeline no longer makes: the old bar charts/histograms (fig_* in the
+# outputs root) and the old comparison tables. report moves them to outputs/retired_v2/ so they can never be shown as
+# current results (moved, not deleted).
+V2_FILES = ["comparison_table_numeric.csv", "comparison_table_star_level.csv", "ablation_table_star_level.csv",
+            "ml_observer_features_table.csv", "rganet_learned_lambda.csv", "metrics_per_seed.csv", "lightcurve_star.csv",
+            "figure_export_log.csv"]
+
+
+def retire_v2_outputs(out):
+    """Move old v2 figures (outputs/fig_*.png|html|json) and old v2 tables into outputs/retired_v2/. Returns names."""
+    moved = []
+    for f in sorted(os.listdir(out)):
+        p = os.path.join(out, f)
+        if os.path.isfile(p) and (f.startswith("fig_") or f in V2_FILES):
+            dst = os.path.join(out, "retired_v2")
+            os.makedirs(dst, exist_ok=True)
+            os.replace(p, os.path.join(dst, f))
+            moved.append(f)
+    if moved:
+        print(f"moved {len(moved)} old v2 result files (bar charts, histograms, old tables) to {out}/retired_v2/")
+    return moved
 
 
 def _read(out, name):
@@ -99,7 +120,8 @@ def build(cfg):
     def pvp_fig():
         p = pvp[(pvp["level"] == level) & (pvp["metric"].isin(["mcc", "pr_auc"]))]
         rows = []
-        c = lv.set_index("model")
+        # one row per model: the prior approaches (without observer features) and the proposed RGA-Net full
+        c = lv[lv["role"].isin(["prior approach", "proposed"])].set_index("model")
         for m in [x for x in ORDER if x != "RGA-Net"]:
             q = p[p["prior_model"] == m].set_index("metric")
             if not len(q):
@@ -114,8 +136,8 @@ def build(cfg):
         won = int((p[p["metric"] == "mcc"]["mean_difference"] > 0).sum())
         n = int((p["metric"] == "mcc").sum())
         cap = (f"Inference: RGA-Net's mean MCC is higher than {won} of {n} prior approaches (classic models WITHOUT "
-               "observer features). 'Seeds ahead' counts the splits where RGA-Net wins; with 10 seeds a Wilcoxon "
-               "p below 0.05 needs a consistent win, so a larger p means the difference is not reliable.")
+               "observer features). 'Seeds ahead' counts strict wins, excluding ties. Splits overlap, so Wilcoxon "
+               "p-values are descriptive; a large p-value does not establish equivalence.")
         return plots.table_figure(t, f"Proposed RGA-Net vs prior approaches (paired over the same seeds, {level} level)",
                                   highlight_col="MCC difference"), cap
     emit("09_prior_vs_proposed", "Proposed vs prior approaches", pvp_fig, pvp, lv)
@@ -156,6 +178,7 @@ def small_tables(cfg):
 
 
 def run(cfg):
+    retire_v2_outputs(cfg.output_dir)
     captions, missing = build(cfg)
     small_tables(cfg)
     files = [os.path.join(dp, f) for d in (cfg.output_dir, cfg.dashboard_dir) for dp, _, fs in os.walk(d) for f in fs]

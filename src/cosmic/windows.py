@@ -290,6 +290,8 @@ def star_attrition(spark, cfg, per_star_windows, splits):
 
 
 def run(spark, cfg):
+    import time
+    t0 = time.time()
     w = cfg.section("windows")
     sp = cfg.section("split")
     vb, vt = assign_windows(spark, cfg)
@@ -356,6 +358,6 @@ def run(spark, cfg):
                         + table_bytes(spark, cfg.table("window_sequences")), rows=len(idx),
                         changes=f"{len(idx):,} windows from {idx['auid'].nunique()} stars; {len(labelled)} labelled "
                                 f"stars in {len(sp['seeds'])} star-grouped splits",
-                        extra={"npz file": f"{path} ({os.path.getsize(path) / 2**20:.1f} MB)"})
+                        seconds=time.time() - t0, extra={"npz file": f"{path} ({os.path.getsize(path) / 2**20:.1f} MB)"})
     spark.catalog.dropTempView("w_obs")
     return summary

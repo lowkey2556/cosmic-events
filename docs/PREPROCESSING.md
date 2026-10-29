@@ -8,7 +8,7 @@ are logged (Hive table `preprocess_log`, file `preprocess_row_counts.csv`).
 | What | Tool | Why |
 |---|---|---|
 | Copy the raw AAVSO CSV exports from Google Drive into HDFS `/cosmic/raw/` with `hdfs dfs -put` | **Hadoop HDFS** | Distributed, fault-tolerant storage. Every later step reads from the cluster, not from a laptop folder. |
-| Fetch each star's VSX type and coordinates (only the stars in our files) | astroquery → VizieR `B/vsx`; saved as Hive table `star_labels` | Gives the ground-truth class and the sky position |
+| Fetch each star's VSX type and coordinates (only the stars in our files) | astroquery → VizieR `B/vsx` (main server, then mirrors); NASA HEASARC's copy `aavsovsx` when no VizieR server answers; saved as Hive table `star_labels` | Gives the ground-truth class and the sky position |
 | Read the CSVs with an **explicit schema** (every column named; read as text, then cast) | **Spark** | Blank uncertainties and `NA` comparison stars become nulls instead of crashing the job |
 | Add `obs_year` (from the Julian Date) and `sky_region` (declination band from VSX; `UNKNOWN` if missing) | **Spark SQL** | These become the partition columns |
 | Write **Parquet + Snappy**, partitioned by `obs_year` / `sky_region` | **Spark → HDFS** | Columnar and compressed, so a query reads only the columns and folders it needs |
@@ -57,10 +57,40 @@ Output: Hive table `obs_clean` (one row per usable detection, with `mag_norm` an
 `obs_id`).
 
 Rows are counted after every step **in total** (`preprocess_row_counts.csv`, with the rows and
-the % removed by each step, and `fig_preprocessing_funnel`) and **per star**
+the % removed by each step; drawn as the Sankey chart `figures/03_cleaning_sankey`) and **per star**
 (`preprocess_rows_per_star.csv`, Hive table `preprocess_star_log`). The per-star counts feed
 `star_attrition.csv` (Step 5), so any star that disappears can be traced to the exact step that
 removed it.
+
+Also saved for the report: `data_quality_aavso.csv` (size, rows, nulls, duplicates, flagged rows, bands, stars,
+observers before vs after) and a 10-row raw/cleaned sample of one star (`sample_aavso_raw.csv`,
+`sample_aavso_clean.csv`).
+
+## Step 2b: ZTF light curves at Big Data scale (Phase 2, Spark)
+
+The 117 ZTF DR24 files (8.53 GB; 4.1 million light curves; 841 million epochs) hold **one row per light curve** (one
+object in one filter) with the epochs as arrays (`hmjd`, `mag`, `magerr`, `clrcoeff`, `catflags`). Spark cleans the
+arrays in place with higher-order functions (`arrays_zip`, `filter`, `array_distinct`, `transform`), so the 841 million
+epochs are never exploded into rows for cleaning.
+
+| Step | What | Tool |
+|---|---|---|
+| `ztf_ingest` | Copy every file from Drive into HDFS `/cosmic/ztf/raw/field=<id>/filter=<zg/zr/zi>/` (Hadoop FileSystem API); register the external Hive table `ztf_lightcurves_raw`, partitioned by field and filter, with the column types **read from the files themselves** | HDFS, Hive |
+| `ztf_clean` 1 | Keep valid filters (zg, zr, zi) and positions | Spark SQL |
+| 2 | Remove epochs with a missing/NaN magnitude or error, or error ≤ 0 | Spark SQL `filter` |
+| 3 | Remove epochs with any quality flag (`catflags != 0`) | Spark SQL |
+| 4 | Remove saturated epochs (`mag ≤ 12.5`, `ztf.saturation_mag`) | Spark SQL |
+| 5 | Remove exact repeated epochs | `array_distinct` |
+| 6 | Drop light curves with fewer than 20 good epochs | Spark SQL |
+| | Write `ztf_lightcurves_clean` (Snappy Parquet, partitioned by field/filter); check its size against **5 GB** (PASS/FAIL, and an estimate of the extra raw data needed when short); keep a copy in `v3_5GB/clean/` that later runs restore instead of re-cleaning (only when it was made from the same raw files) | Spark, HDFS, Hive |
+| `ztf_label` | VSX variables of our label-map types around every field centre (VizieR, else HEASARC), cross-matched to ZTF objects within **2″** (declination-bucket equi-join + exact angular distance); **every ZTF object within 10″ of an AAVSO star is flagged and excluded from training** → Hive `ztf_labels` | Spark SQL + astroquery |
+| `ztf_windows` | The same 100-day windows (A_k = 1, offset 0), class-balanced, ≤ 50,000 → `ztf_window_features`, `ztf_window_sequences`, `work/ztf_windows_seq.npz` | Spark |
+| `akval` | AAVSO observations matched to the nearest unsaturated ZTF point of the same star within 1 day; per (star, AAVSO band, ZTF filter) median offset removed; each observer's robust scatter against ZTF compared with A_k (Spearman ρ, with numbers of observers and points; "too small to conclude" below 10 observers) | Spark SQL + SciPy |
+
+Counts after every ZTF step: `ztf_clean_steps.csv` (the ZTF half of the Sankey chart); before/after table:
+`data_quality_ztf.csv`; size check: `ztf_clean_size_check.csv`; labels: `ztf_label_counts.csv`; windows:
+`ztf_window_counts.csv`; A_k check: `ak_validation_summary.csv`, `ak_vs_ztf_observers.csv`. Where the data is at every
+stage, with measured sizes and times: `outputs/DATA_FLOW.txt` (see [DATA_FLOW_EXPLAINED.md](DATA_FLOW_EXPLAINED.md)).
 
 ## Step 3: Observer agreement score
 
@@ -70,6 +100,11 @@ the join small, each row gets a day bucket `floor(jd / Δt)` and is joined only 
 neighbouring buckets (a fast equi-join). The exact `|Δt|` test is then applied. Medians and
 MADs are computed with Spark SQL `percentile`. Outputs: Hive tables `observer_residuals` and
 `observer_scores`.
+
+These scores use the whole unlabelled archive before the star split. The current experiment is therefore
+transductive; held-out magnitudes can influence observer scores and offsets. It does not estimate a strictly
+inductive deployment to unseen stars. Band normalisation also assumes the complete light curve is available.
+See the evaluation boundary in [PROPOSED_MODEL.md](PROPOSED_MODEL.md).
 
 ## Step 4: Per-star features (for K-Means)
 
@@ -102,7 +137,7 @@ see [CLASSIFICATION.md](CLASSIFICATION.md) and [PROPOSED_MODEL.md](PROPOSED_MODE
 The Spark part that does the heavy lifting — preprocessing plus windowing — is re-run through
 YARN with 1, 2 and 4 executors (1 core, 1 GB each), 3 times each. `scalability.csv` reports the
 mean ± std time, the speedup over 1 executor, how many executors YARN actually granted, and the
-machine's CPU core count (`fig_scalability`). On a 2-core Colab VM, at most 2 executors can run
+machine's CPU core count (a table; no chart). On a 2-core Colab VM, at most 2 executors can run
 truly in parallel, so a flat speedup beyond 2 is expected there.
 
 ## Why "never group on `target`"

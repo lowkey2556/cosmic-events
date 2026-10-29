@@ -103,6 +103,8 @@ def spearman(df):
 
 
 def run(spark, cfg):
+    import time
+    t0 = time.time()
     spark.table(cfg.table("obs_clean")).createOrReplaceTempView("os_clean")
     res = residuals(spark, "os_clean", cfg.section("observer_score")["window_days"])
     save_hive_table(res, cfg, "observer_residuals")
@@ -148,7 +150,7 @@ def run(spark, cfg):
                     table_bytes(spark, cfg.table("observer_residuals")), rows=len(pdf),
                     changes=f"{n_res:,} observations got a consensus residual; {len(pdf)} observers scored "
                             f"({int((~pdf['low_n']).sum())} with enough overlap)",
-                    seconds=None)
+                    seconds=time.time() - t0)
     if cfg.dataset == "synthetic":
         print("SANITY CHECK:", sanity_check(pdf))
     return pdf

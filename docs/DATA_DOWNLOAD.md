@@ -81,10 +81,15 @@ a clear error (they would be skipped, or overwrite each other in HDFS).
 MyDrive/
 └── cosmic_roja/                 <- PROJECT_ROOT: every path below is derived from it
     ├── data/                    <- ALL the AAVSO CSVs, directly in this folder (no sub-folders)
-    ├── outputs/review2/         <- created automatically: every table and figure for Review 2
-    └── work/                    <- created automatically: models, window tensors, splits, predictions,
-        ├── labels/              <-   vsx_labels.csv (star types from VizieR, fetched when missing)
-        └── cache/               <-   Hadoop/Spark/Hive downloads (saves time after a reset)
+    ├── work/
+    │   ├── labels/              <-   vsx_labels.csv (star types from VSX, fetched when missing)
+    │   └── cache/               <-   Hadoop/Spark/Hive downloads (saves time after a reset)
+    └── v3_5GB/                  <- V3_ROOT: created automatically; EVERYTHING the pipeline writes
+        ├── ztf_raw/             <-   the 117 ZTF files + MANIFEST.csv (downloaded once, MD5-verified)
+        ├── clean/               <-   copy of the cleaned ZTF table
+        ├── work/                <-   window tensors, splits, models, predictions, data-flow records
+        ├── outputs/             <-   every table, figures/, COMPARISON.md, DATA_FLOW.txt
+        └── dashboard_data/      <-   dashboard tables + DATA_DICTIONARY.md
 ```
 
 The old `MyDrive/cosmic` folder (renamed `cosmic_OLD_do_not_use`) is never read or written:
@@ -92,8 +97,8 @@ the notebook stops if any path points there.
 
 ## Labels (VSX)
 
-Step 1 queries VizieR `B/vsx/vsx` with astroquery, **only for the stars found in your files**,
-one request per second. It saves `work/labels/vsx_labels.csv` (under PROJECT_ROOT) with columns `auid,name,ra,dec,type`.
+Step 1 queries VizieR `B/vsx/vsx` with astroquery (main server, then its mirrors; NASA HEASARC's copy `aavsovsx` when
+no VizieR server answers), **only for the stars found in your files**, one request per second. It saves `work/labels/vsx_labels.csv` (under PROJECT_ROOT) with columns `auid,name,ra,dec,type`.
 If that fails (for example, VizieR is down), export the rows by hand from
 <https://vizier.cds.unistra.fr/viz-bin/VizieR-3?-source=B/vsx/vsx>: search each name and keep the
 columns Name, RAJ2000, DEJ2000 and Type. Save them as `work/labels/vsx_labels.csv` with the header

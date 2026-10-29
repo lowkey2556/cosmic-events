@@ -205,7 +205,7 @@ rganet:
   pretrain_batch_size: 128
   pretrain_patience: 3                         # on a 10 % hold-out of ZTF light curves (by object)
   # 2. fine-tuning per seed on the AAVSO train split, all layers, gate active; small grid chosen on validation
-  grid_seed: 1                                 # the grid is evaluated on this split's validation set only
+  # The grid is evaluated separately on each split's validation stars, never across splits.
   grid:
     lr: [0.0001, 0.0003]
     dropout: [0.1, 0.3]
