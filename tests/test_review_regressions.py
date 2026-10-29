@@ -65,16 +65,44 @@ def test_training_signature_uses_content_including_splits_and_vocab(tmp_path):
         previous = current
 
 
-def test_notebook_checks_out_the_reviewed_branch(tmp_path):
+def test_notebook_checks_out_main_after_review_branch_merge(tmp_path):
     import build_notebook
 
     notebook = build_notebook.build(str(tmp_path / "test.ipynb"))
     setup = next("".join(c["source"]) for c in notebook["cells"]
                  if c["cell_type"] == "code" and "REPO_URL =" in "".join(c["source"]))
-    assert 'REPO_BRANCH = "v3-phase2-4-verified"' in setup
+    assert 'REPO_BRANCH = "main"' in setup
     assert "clone -q --branch {REPO_BRANCH}" in setup
     assert "switch {REPO_BRANCH}" in setup
     assert "merge --ff-only origin/{REPO_BRANCH}" in setup
+
+
+def test_local_disk_setup_and_results_skip_drive_mount(tmp_path, monkeypatch):
+    import ast
+    import sys
+    from types import ModuleType
+    import build_notebook
+
+    notebook = build_notebook.build(str(tmp_path / "test.ipynb"))
+    sources = ["".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code"]
+    guards = []
+    for source in sources:
+        for node in ast.parse("\n".join(line for line in source.splitlines()
+                                       if not line.startswith("!"))).body:
+            if isinstance(node, ast.If) and "drive.mount(" in ast.unparse(node):
+                guards.append(node)
+    assert len(guards) == 2
+    calls = []
+    colab = ModuleType("google.colab")
+    colab.drive = SimpleNamespace(mount=calls.append)
+    monkeypatch.setitem(sys.modules, "google.colab", colab)
+    for root, expected in (("/content/cosmic_roja", 0), ("/content/drive/MyDrive/cosmic_roja", 2)):
+        calls.clear()
+        env = dict(PROJECT_ROOT=root, V3=f"{root}/v3_5GB",
+                   os=SimpleNamespace(path=SimpleNamespace(isdir=lambda path: False)))
+        for guard in guards:
+            exec(compile(ast.Module(body=[guard], type_ignores=[]), "mount-guard", "exec"), env)
+        assert len(calls) == expected
 
 
 def test_notebook_pipeline_stops_when_a_step_fails():

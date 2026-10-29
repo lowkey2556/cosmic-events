@@ -47,16 +47,17 @@ saved table and figure; nothing is recomputed.
 Guide: `docs/COLAB_GUIDE.md`; data journey: `docs/DATA_FLOW_EXPLAINED.md`. Everything new is written under
 `cosmic_roja/v3_5GB/`; `data/` and `work/cache/` are only read."""),
     ("md", """## SETUP — run this first, every session
-Mounts Drive, sets **every** path and environment variable, gets or updates the code, and installs Python: a Python 3.12
+Mounts Drive when PROJECT_ROOT points into Drive, sets **every** path and environment variable, gets or updates the code, and installs Python: a Python 3.12
 environment for the Spark steps (PySpark 3.5 does not support Python 3.13) and the notebook's own packages. It then prints
 the resolved paths and **stops** if `data/` is missing or holds CSVs in sub-folders or duplicate names, or if a path points
 at a retired folder (`MyDrive/cosmic`, `cosmic_OLD_do_not_use`, `_OLD_100MB`)."""),
     ("code", """PROJECT_ROOT = "/content/drive/MyDrive/cosmic_roja"
 REPO_URL = "https://github.com/lowkey2556/cosmic-events.git"
-REPO_BRANCH = "v3-phase2-4-verified"
+REPO_BRANCH = "main"
 import os, subprocess, sys
-from google.colab import drive
-drive.mount("/content/drive")
+if PROJECT_ROOT.startswith("/content/drive/"):
+    from google.colab import drive
+    drive.mount("/content/drive")
 os.environ.update(COSMIC_PROJECT_ROOT=PROJECT_ROOT, V3_ROOT=f"{PROJECT_ROOT}/v3_5GB", CACHE_DIR=f"{PROJECT_ROOT}/work/cache",
                   COSMIC_SPARK_PY="/content/cosmic_py/bin/python", PYTHON="/content/cosmic_py/bin/python")
 
@@ -179,10 +180,10 @@ lists anything missing and ends with **{END_MARKER}**."""),
     ("code", """import os, json
 import pandas as pd
 from IPython.display import Image, Markdown, display
-if not os.path.isdir("/content/drive/MyDrive"):
+V3 = os.environ.get("V3_ROOT", "/content/drive/MyDrive/cosmic_roja/v3_5GB")
+if V3.startswith("/content/drive/") and not os.path.isdir("/content/drive/MyDrive"):
     from google.colab import drive
     drive.mount("/content/drive")
-V3 = os.environ.get("V3_ROOT", "/content/drive/MyDrive/cosmic_roja/v3_5GB")
 OUT, FIG, DASH = f"{V3}/outputs", f"{V3}/outputs/figures", f"{V3}/dashboard_data"
 pd.set_option("display.width", 220); pd.set_option("display.max_columns", 40); pd.set_option("display.max_rows", 200)
 CAPS = json.load(open(f"{OUT}/figure_captions.json", encoding="utf-8")) if os.path.exists(f"{OUT}/figure_captions.json") else {}
