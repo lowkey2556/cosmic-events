@@ -47,7 +47,22 @@ def spark(tmp_path_factory):
             "sys.meta_path.insert(0, _TorchFirst())\n")
         paths.insert(0, str(boot))
     os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (*paths, os.environ.get("PYTHONPATH")) if p)
-    os.environ["PYSPARK_PYTHON"] = sys.executable  # workers must use the same Python as the driver (e.g. a 3.12 venv)
+    py = sys.executable
+    if os.name == "nt":
+        # Spark's Windows batch scripts expand these inside parenthesised blocks.
+        # Unquoted paths such as "New folder (31)" break cmd.exe parsing; use their 8.3 aliases.
+        import ctypes
+        import pyspark
+
+        def short_path(path):
+            buf = ctypes.create_unicode_buffer(32768)
+            if not ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, len(buf)):
+                raise OSError(f"Cannot resolve the Windows short path for {path}")
+            return buf.value
+
+        py = short_path(py)
+        os.environ["SPARK_HOME"] = short_path(os.path.dirname(pyspark.__file__))
+    os.environ["PYSPARK_PYTHON"] = py  # workers must use the same Python version and environment as the driver
     from pyspark.sql import SparkSession
     s = (SparkSession.builder.master("local[2]").appName("cosmic-tests")
          .config("spark.sql.shuffle.partitions", "4")

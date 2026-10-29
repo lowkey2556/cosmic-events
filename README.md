@@ -40,7 +40,7 @@ Docs: [PROPOSED_MODEL](docs/PROPOSED_MODEL.md) · [CLASSIFICATION](docs/CLASSIFI
    (`ztf_raw/`, `clean/`, `work/`, `outputs/`, `dashboard_data/`); labels and the stack's tarball cache stay in
    `work/` (see [docs/DATA_DOWNLOAD.md](docs/DATA_DOWNLOAD.md)). The old `MyDrive/cosmic`
    folder is never used: the notebook stops if a path points there.
-2. Open <https://colab.research.google.com/github/lowkey2556/cosmic-events/blob/main/notebooks/cosmic_colab.ipynb>
+2. Open <https://colab.research.google.com/github/lowkey2556/cosmic-events/blob/v3-phase2-4-verified/notebooks/cosmic_colab.ipynb>
    and choose a **T4 GPU** runtime.
 3. Run the cells in order (order and measured timings: [docs/COLAB_GUIDE.md](docs/COLAB_GUIDE.md)). The last section,
    **▶️ RESULTS — start here**, only reads saved files and ends with `ALL RESULTS SHOWN`.

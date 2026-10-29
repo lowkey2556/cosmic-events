@@ -25,7 +25,8 @@ FIGURES = [
 
 def run(step, note="", data=True):
     """A cell that runs one or more run.py steps (their wall time is saved to outputs/step_timings.csv)."""
-    return f"!python run.py {step}" + (" --data real" if data else "") + (f"   # {note}" if note else "")
+    cmd = f"python run.py {step}" + (" --data real" if data else "")
+    return f"sh({cmd!r})" + (f"   # {note}" if note else "")
 
 
 CELLS = [
@@ -52,6 +53,7 @@ the resolved paths and **stops** if `data/` is missing or holds CSVs in sub-fold
 at a retired folder (`MyDrive/cosmic`, `cosmic_OLD_do_not_use`, `_OLD_100MB`)."""),
     ("code", """PROJECT_ROOT = "/content/drive/MyDrive/cosmic_roja"
 REPO_URL = "https://github.com/lowkey2556/cosmic-events.git"
+REPO_BRANCH = "v3-phase2-4-verified"
 import os, subprocess, sys
 from google.colab import drive
 drive.mount("/content/drive")
@@ -67,9 +69,11 @@ def sh(cmd):
         raise RuntimeError(f"command failed ({p.returncode}): {cmd}")
 
 if os.path.isdir("/content/cosmic/.git"):
-    sh("git -C /content/cosmic pull -q")
+    sh(f"git -C /content/cosmic fetch -q origin {REPO_BRANCH}")
+    sh(f"git -C /content/cosmic switch {REPO_BRANCH}")
+    sh(f"git -C /content/cosmic merge --ff-only origin/{REPO_BRANCH}")
 else:
-    sh(f"git clone -q {REPO_URL} /content/cosmic")
+    sh(f"git clone -q --branch {REPO_BRANCH} {REPO_URL} /content/cosmic")
 os.chdir("/content/cosmic")
 sys.path.insert(0, "/content/cosmic/src")
 sh("git log --oneline | head -3")
@@ -106,8 +110,8 @@ sh("python run.py ztf_download")            # no download when every file is alr
     # ------------------------------------------------------------------ stack
     ("md", """## The Big Data stack: install, start, smoke tests
 Java 8 from apt; Hadoop, Spark, Hive and Derby tarballs from `PROJECT_ROOT/work/cache/` (downloaded only if missing)."""),
-    ("code", "!bash setup/install_stack.sh"),
-    ("code", "!bash setup/start_stack.sh"),
+    ("code", 'sh("bash setup/install_stack.sh")'),
+    ("code", 'sh("bash setup/start_stack.sh")'),
     ("code", """# Load the stack's environment (JAVA_HOME, HADOOP_HOME, SPARK_HOME, HIVE_HOME, PATH...) into this kernel
 import os, re
 env_file = open('setup/ENV_LOCATION').read().strip()
@@ -116,8 +120,8 @@ for line in open(env_file):
     if m:
         os.environ[m.group(1)] = os.path.expandvars(m.group(2))
 !java -version 2>&1 | head -1; hadoop version | head -1; spark-submit --version 2>&1 | grep -m1 version; hive --version 2>/dev/null | head -1"""),
-    ("code", "!bash -c 'for t in 1 2 3 4 5; do bash setup/smoke_tests.sh $t || exit 1; done'   # each must print PASS"),
-    ("code", "!which dot >/dev/null || apt-get -qq install -y graphviz\n" + run("architecture")),
+    ("code", "sh(\"bash -c 'for t in 1 2 3 4 5; do bash setup/smoke_tests.sh $t || exit 1; done'\")   # each must print PASS"),
+    ("code", 'sh("command -v dot >/dev/null || apt-get -qq install -y graphviz")\n' + run("architecture")),
 
     # ------------------------------------------------------------------ Phase 2
     ("md", """## Phase 2a — AAVSO in Spark: ingest, cleaning, observer scores A_k
@@ -145,7 +149,7 @@ NB, DT, RF, LR on 10 splits; with and without observer features; data setting (A
 windows) and grid chosen on validation AUPRC; validation and test probabilities saved."""),
     ("code", run("cluster+classify")),
     ("md", """## Phase 3b — RGA-Net (PyTorch, GPU): ZTF pre-training, validation grid, 4 variants × 10 seeds
-Pre-trains once on ZTF windows, chooses lr × dropout × hybrid head on ONE split's validation stars, then fine-tunes
+Pre-trains once on ZTF windows, chooses lr × dropout × hybrid head separately within EACH split, then fine-tunes
 `full`, `no_pretrain`, `no_gate`, `observer_blind` on every split. Training-only augmentation. **Resumable:** after a
 disconnect just run the cell again — finished pre-training, grid points and (variant, seed) runs are reused."""),
     ("code", run("rganet")),
@@ -250,7 +254,7 @@ figure("10_radar"); figure("13_confusion_grid")"""),
 table("observer_feature_gain.csv", "Without -> with observer features (MCC)", query="metric == 'mcc'")"""),
     ("md", "## 6. RGA-Net: pre-training, chosen setting, ablation, learned λ"),
     ("code", """table("rganet_pretraining.csv", "ZTF pre-training (hold-out by light curve)")
-table("rganet_grid.csv", "Validation grid (one split's validation stars only)")
+table("rganet_grid.csv", "Validation grid (separate selection within each split)")
 figure("12_ablation")
 table("ablation_table.csv", "Ablation (mean ± std)", cols=["display_name", "level", "seeds", "mcc", "roc_auc", "pr_auc", "kappa", "brier"])
 table("ablation_paired.csv", "Ablation, paired over seeds (variant − full)", query="metric == 'mcc'")

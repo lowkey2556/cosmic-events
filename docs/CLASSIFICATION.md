@@ -95,6 +95,11 @@ implementation** (`src/cosmic/evaluation.py`) computes every metric, from the sa
 MCC uses all four cells of the confusion matrix, so it is not flattered by class imbalance; κ corrects accuracy for
 chance agreement; Brier checks the probabilities themselves, not just their ranking.
 
+The ten repeated splits share stars and training data; their paired differences are not independent experimental
+replications. Treat the Wilcoxon values as descriptive, not proof of population-level significance. A large p-value
+does not establish equivalence. The current archive-wide observer calibration is transductive (see PROPOSED_MODEL);
+star-grouped splits alone do not make that preprocessing strictly inductive.
+
 ## 5. Distributed inference
 
 After training, Spark applies the saved RGA-Net models (one per split) to **every** window in parallel (`mapInPandas`,

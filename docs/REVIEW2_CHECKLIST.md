@@ -1,7 +1,8 @@
 # Review 2 checklist (v3): every requirement → exact files
 
-All result files are produced **from the real AAVSO and ZTF data** by the notebook (`notebooks/cosmic_colab.ipynb`;
-`python run.py <step> --data real`) and saved under **`MyDrive/cosmic_roja/v3_5GB/`** (`outputs/`, `outputs/figures/`,
+This is an expected-output checklist, not a record of a verified real-data run. Real model results still require
+execution and inspection in Colab. When run on **real AAVSO and ZTF data**, the notebook (`notebooks/cosmic_colab.ipynb`;
+`python run.py <step> --data real`) writes the files under **`MyDrive/cosmic_roja/v3_5GB/`** (`outputs/`, `outputs/figures/`,
 `dashboard_data/`). The notebook's last section, **▶️ RESULTS — start here**, shows all of them and ends with
 `ALL RESULTS SHOWN`. Charts are Plotly (PNG + HTML + JSON); **no bar charts or histograms** (enforced by a test). Old v2
 files are moved to `outputs/retired_v2/` by the `report` step and are not results. Synthetic data never reaches these
@@ -40,7 +41,7 @@ folders: synthetic runs write to `synthetic_run/`.
 | Model, equations, why RGA-Net, related work | [PROPOSED_MODEL.md](PROPOSED_MODEL.md) |
 | Implementation | `src/cosmic/rganet.py` |
 | ZTF pre-training (hold-out AUPRC, epochs, time) | `rganet_pretraining.csv`; `work/models/pretrained_{full,blind}.pt` |
-| Validation-grid selection (one split's validation stars only) | `rganet_grid.csv` |
+| Validation-grid selection separately within each split | `rganet_grid.csv`; tuning excludes that split's test stars |
 | 4 variants × 10 seeds: best epoch, time, parameters, learned λ | `rganet_runs.csv`, `rganet_history.csv`, `rganet_lambda.csv` |
 | Ablation | figure 12; `ablation_table.csv`, `ablation_paired.csv` |
 | Trained models; Spark applies them to all windows | `work/models/rganet_<variant>_seed<n>.pt`; Hive `window_predictions`; `distributed_inference_check.csv` |
@@ -73,7 +74,7 @@ folders: synthetic runs write to `synthetic_run/`.
 | Split by star; no star in two sets; 10 splits shared by every model | `splits.py`; `test_star_split_disjoint_stratified_reproducible` |
 | Nothing chosen on test (grids, data setting, early stopping, thresholds) | `classify.py`, `rganet.choose_config`, `evaluation.choose_threshold`; `test_threshold_comes_from_validation_only` |
 | ZTF never in validation/test; no ZTF object near an AAVSO star in training | `classify.fit_predict`, `ztf_spark.match_labels`; `test_leakage_ztf_windows_only_ever_train_the_ml_models`, `test_leakage_ztf_objects_near_aavso_stars_are_flagged_and_match_radius` |
-| Augmentation and input statistics from training windows only | `rganet.fit`, `rganet.train_one`; `test_leakage_rganet_statistics_and_augmentation_use_training_windows_only` |
+| Augmentation and token scaling from training windows only | `rganet.fit`, `rganet.train_one`; `test_leakage_rganet_statistics_and_augmentation_use_training_windows_only`. Observer scores are archive-wide and transductive; see PROPOSED_MODEL. |
 | "Prior approach" = classic model without observer features only (Fix 1) | `compare.role`, `compare.prior_vs_proposed`; `test_fix1_prior_approaches_are_classic_models_without_observer_features` |
 | Comparison only from saved predictions | `compare.load_predictions`; `test_compare_end_to_end_on_synthetic_predictions` |
 | Metrics correct | `evaluation.py`; `test_mcc_kappa_brier_by_hand_and_against_sklearn`, `test_metrics_by_hand`, `test_paired_wilcoxon_matches_scipy` |

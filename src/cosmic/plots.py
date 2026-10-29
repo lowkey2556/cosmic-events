@@ -66,7 +66,8 @@ def save(fig, out_dir, name, width=1600, height=900):
     fig.update_layout(width=width, height=height)
     fig.update_annotations(font=dict(family=FONT, size=20, color=INK))  # subplot titles
     fig.write_html(base + ".html", include_plotlyjs=EXPORT["html_plotlyjs"], full_html=True)
-    fig.write_json(base + ".json")
+    with open(base + ".json", "w", encoding="utf-8") as fh:
+        fig.write_json(fh)
     try:
         fig.write_image(base + ".png", width=width, height=height, scale=EXPORT["png_scale"])
     except Exception as exc:  # noqa: BLE001 - any export failure is reported; the HTML is kept

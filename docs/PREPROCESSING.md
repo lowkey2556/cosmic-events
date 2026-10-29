@@ -101,6 +101,11 @@ neighbouring buckets (a fast equi-join). The exact `|Δt|` test is then applied.
 MADs are computed with Spark SQL `percentile`. Outputs: Hive tables `observer_residuals` and
 `observer_scores`.
 
+These scores use the whole unlabelled archive before the star split. The current experiment is therefore
+transductive; held-out magnitudes can influence observer scores and offsets. It does not estimate a strictly
+inductive deployment to unseen stars. Band normalisation also assumes the complete light curve is available.
+See the evaluation boundary in [PROPOSED_MODEL.md](PROPOSED_MODEL.md).
+
 ## Step 4: Per-star features (for K-Means)
 
 One row per star, built with Spark SQL aggregates. The Lomb–Scargle periodogram (astropy) runs

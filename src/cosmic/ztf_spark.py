@@ -83,6 +83,15 @@ def _manifest_key(man):
     return hashlib.md5("".join(sorted(man["md5"])).encode()).hexdigest()
 
 
+def _clean_key(cfg, man):
+    """A Drive clean copy is valid only for the same raw files, quality cuts and cleaning code."""
+    keys = ("saturation_mag", "min_clean_epochs", "filters")
+    with open(__file__, "rb") as fh:
+        code = hashlib.sha256(fh.read()).hexdigest()
+    return hashlib.sha256(json.dumps([_manifest_key(man), {k: cfg.section("ztf")[k] for k in keys}, code],
+                                     sort_keys=True).encode()).hexdigest()
+
+
 # ------------------------------------------------------------------ ztf_ingest
 def ingest_run(spark, cfg):
     t0 = time.time()
@@ -132,7 +141,7 @@ def _restore_clean(spark, cfg, man):
     if not (z.get("copy_clean_to_drive", True) and os.path.exists(marker)):
         return False
     with open(marker) as fh:
-        if json.load(fh).get("manifest") != _manifest_key(man):
+        if json.load(fh).get("clean_key") != _clean_key(cfg, man):
             return False
     jvm, fs = _fs(spark, cfg)
     dst = cfg.hdfs_uri(f"{cfg.hdfs_base}/ztf/clean")
@@ -239,7 +248,8 @@ def clean_run(spark, cfg):
         shutil.rmtree(copy, ignore_errors=True)
         fs.copyToLocalFile(False, jvm.org.apache.hadoop.fs.Path(loc), jvm.org.apache.hadoop.fs.Path("file://" + copy), True)
         with open(os.path.join(copy, "_COSMIC_SOURCE.json"), "w") as fh:
-            json.dump(dict(manifest=_manifest_key(man), made=time.strftime("%Y-%m-%d %H:%M")), fh)
+            json.dump(dict(manifest=_manifest_key(man), clean_key=_clean_key(cfg, man),
+                           made=time.strftime("%Y-%m-%d %H:%M")), fh)
         print(f"copied the cleaned table to {copy}")
     dataflow.record(cfg, "ztf_clean", "Spark SQL cleans the epoch arrays in place with higher-order functions "
                     "(filter / arrays_zip / array_distinct): invalid values, flagged and saturated epochs and exact "

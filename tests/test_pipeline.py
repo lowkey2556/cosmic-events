@@ -981,14 +981,14 @@ def test_vizier_falls_back_to_a_mirror(monkeypatch):
 
 
 def test_field_ranking_without_vizier(monkeypatch):
-    from cosmic import vizier as vz
+    from cosmic import vsx
     from cosmic import ztf
     from cosmic.config import load_config
 
     def unreachable(*a, **k):
-        raise RuntimeError("No VizieR server answered (x)")
+        raise RuntimeError("No VSX backend answered (synthetic test)")
 
-    monkeypatch.setattr(vz, "pick_server", unreachable)
+    monkeypatch.setattr(vsx, "backend", unreachable)
     centres = pd.DataFrame({"field": [1, 2], "ra": [10.0, 20.0], "dec": [5.0, 6.0]})
     assert ztf.vsx_richness(load_config("synthetic"), centres, 3.5) is None    # caller ranks by distance instead
 

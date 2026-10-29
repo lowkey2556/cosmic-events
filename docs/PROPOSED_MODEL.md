@@ -104,9 +104,10 @@ with training-window statistics) are concatenated to `z` before the MLP.
    object within 10″ of any AAVSO star is in this pool (`ztf_label`), so no test star is seen in pre-training. 10 % of
    the ZTF light curves (by object hash) are held out for early stopping (patience 3, up to 12 epochs). A second encoder
    without the A_k/offset token features is pre-trained the same way for the observer-blind ablation.
-2. **Validation grid, once:** learning rate {1e-4, 3e-4} × dropout {0.1, 0.3} × hybrid head {no, yes}, each fine-tuned
-   on split seed 1 and judged **only on that split's validation stars** (best validation AUPRC). The chosen setting is
-   used for every variant and every seed (`rganet_grid.csv`).
+2. **Validation grid, within each split:** learning rate {1e-4, 3e-4} × dropout {0.1, 0.3} × hybrid head {no, yes},
+   each fine-tuned on that split's training stars and judged only on its validation stars (best validation AUPRC).
+   The chosen setting is shared by the four variants within that split (`rganet_grid.csv`). Settings are never
+   selected using another split: its validation stars could be test stars here. Grid search does not predict test.
 3. **Fine-tuning per seed** on the AAVSO training stars: all layers trained, gate active (λ starts at softplus(0) =
    0.69), input statistics taken from pre-training so the encoder sees inputs on the scale it learned. Class-weighted
    binary cross-entropy (weight of "anomalous" = negatives / positives in the training windows), AdamW (weight decay
@@ -118,7 +119,15 @@ with training-window statistics) are concatenated to `z` before the MLP.
 5. **10 star-grouped 70/15/15 splits** (seeds 1–10), the same for every model. Thresholds for MCC and κ are chosen on
    validation (maximum MCC); the test windows are used once, for the final numbers.
 6. **Resumable:** every finished pre-training, grid point and (variant, seed) run is saved in `work/` and reused if
-   Colab disconnects.
+   Colab disconnects. Content hashes of the window data, splits, vocabulary and training code, together with the
+   training configuration, invalidate stale caches. A reused run must also match its saved checkpoint's hash.
+
+**Evaluation boundary:** the observer scores and offsets are currently computed from the whole unlabelled AAVSO
+archive before the star split. This is a transductive archive experiment: held-out magnitudes can influence those
+features, although held-out labels do not enter training. It must not be described as a strictly inductive estimate
+for unseen stars. A claim about deployment to new stars requires scores calibrated on separate history or on each
+split's training stars, with a documented fallback for unseen observers. Per-star band centring likewise assumes
+the complete observed light curve is available; this is not a causal real-time alert evaluation.
 
 ### Inference at scale (Spark)
 

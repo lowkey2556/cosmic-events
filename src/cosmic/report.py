@@ -136,8 +136,8 @@ def build(cfg):
         won = int((p[p["metric"] == "mcc"]["mean_difference"] > 0).sum())
         n = int((p["metric"] == "mcc").sum())
         cap = (f"Inference: RGA-Net's mean MCC is higher than {won} of {n} prior approaches (classic models WITHOUT "
-               "observer features). 'Seeds ahead' counts the splits where RGA-Net wins; with 10 seeds a Wilcoxon "
-               "p below 0.05 needs a consistent win, so a larger p means the difference is not reliable.")
+               "observer features). 'Seeds ahead' counts strict wins, excluding ties. Splits overlap, so Wilcoxon "
+               "p-values are descriptive; a large p-value does not establish equivalence.")
         return plots.table_figure(t, f"Proposed RGA-Net vs prior approaches (paired over the same seeds, {level} level)",
                                   highlight_col="MCC difference"), cap
     emit("09_prior_vs_proposed", "Proposed vs prior approaches", pvp_fig, pvp, lv)
