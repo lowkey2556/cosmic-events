@@ -81,7 +81,7 @@ def build(cfg):
         parts = [dqa] + ([dqz] if dqz is not None else [])
         dq = pd.concat(parts, ignore_index=True)
         if dqz is not None:
-            num = ["size_mb", "rows", "nulls", "duplicates", "flagged", "bands", "stars", "observers"]
+            num = ["size_mb", "rows", "nulls", "duplicates", "flagged", "saturated", "bands", "stars", "observers"]
             comb = [dict(dataset="AAVSO + ZTF", stage=s, **{c: sum(float(p.iloc[i].get(c, 0) or 0) for p in parts)
                                                            for c in num}) for i, s in ((0, "before"), (-1, "after"))]
             dq = pd.concat([dq, pd.DataFrame(comb)], ignore_index=True)

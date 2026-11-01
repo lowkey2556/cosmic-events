@@ -123,7 +123,7 @@ def caption_samples(raw, clean, dataset):
 def data_quality(dq):
     """dq: rows dataset, stage, size_mb, rows, nulls, duplicates, flagged, bands, stars, observers
     (AAVSO, ZTF and a combined pair). Returns (figure, caption): a before/after table with the change in %."""
-    cols = ["size_mb", "rows", "nulls", "duplicates", "flagged", "bands", "stars", "observers"]
+    cols = ["size_mb", "rows", "nulls", "duplicates", "flagged", "saturated", "bands", "stars", "observers"]
     out = []
     for ds, g in dq.groupby("dataset", sort=False):
         b, a = g.iloc[0], g.iloc[-1]

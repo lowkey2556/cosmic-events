@@ -173,7 +173,7 @@ Run it last; then run `report` again so DATA_FLOW.txt includes it."""),
 
 # ------------------------------------------------------------------ RESULTS (reads saved files only)
 RESULTS = [
-    ("md", f"""# {RESULTS_TITLE}
+    ("md", f"""# {RESULTS_TITLE} (Runtime → Run cell and below)
 Everything below **only reads files** the pipeline saved in `MyDrive/cosmic_roja/v3_5GB/` (no Spark, no training). Run the
 next cell first: it mounts Drive if needed. Each figure is followed by its generated **Inference:** caption. The last cell
 lists anything missing and ends with **{END_MARKER}**."""),
@@ -189,11 +189,12 @@ pd.set_option("display.width", 220); pd.set_option("display.max_columns", 40); p
 CAPS = json.load(open(f"{OUT}/figure_captions.json", encoding="utf-8")) if os.path.exists(f"{OUT}/figure_captions.json") else {}
 SHOWN, MISSING = [], []
 
-def table(name, title, query=None, cols=None):
+def table(name, title, query=None, cols=None, optional=False):
     path = f"{OUT}/{name}"
     display(Markdown(f"**{title}** — `{name}`"))
     if not os.path.exists(path):
-        MISSING.append(name); display(Markdown(f"*not produced yet: {name}*")); return None
+        if not optional: MISSING.append(name)
+        display(Markdown(f"*not produced yet: {name}*")); return None
     d = pd.read_csv(path)
     if query: d = d.query(query)
     if cols: d = d[[c for c in cols if c in d.columns]]
@@ -223,57 +224,16 @@ def text(name, path=None, markdown=False):
     display(Markdown(t)) if markdown else print(t)
     SHOWN.append(name)
 print("results folder:", OUT)"""),
-    ("md", "## 1. Run record: measured step timings and the data flow"),
-    ("code", """table("step_timings.csv", "Wall time of every pipeline step (measured on the latest run of each step)")
-text("DATA_FLOW.txt")"""),
-    ("md", "## 2. Data: audit, cleaning, composition"),
-    ("code", """table("audit_summary.csv", "AAVSO audit (50 MB check)")
-table("ztf_audit_summary.csv", "ZTF audit (files, GB, light curves, epochs, our stars)")
-table("ztf_clean_size_check.csv", "Cleaned ZTF size vs the 5 GB target")
-for n in FIGURES_01: figure(n)
-figure("02_data_quality"); figure("03_cleaning_sankey"); figure("07_composition_sunburst")
-table("ztf_label_counts.csv", "ZTF light curves labelled from VSX (2 arcsec) and excluded near AAVSO stars")
-table("ztf_window_counts.csv", "ZTF pre-training windows (class-balanced, capped)")
-table("window_summary.csv", "AAVSO windows"); table("window_counts_by_class.csv", "AAVSO windows per class")
-table("star_attrition.csv", "Stars not used, and why", query="status != 'used'", cols=["auid", "name", "vsx_type", "status", "reason"])"""),
-    ("md", "## 3. Observer reliability A_k (and its check against ZTF)"),
-    ("code", """figure("04_lightcurve_ak"); figure("05_ak_violin")
-table("ak_summary_by_type.csv", "A_k by observation type (scored observers)")
-figure("06_ak_validation")
-table("ak_validation_summary.csv", "A_k vs scatter against ZTF (Spearman)")
-table("spearman_score_vs_uncertainty.csv", "A_k vs self-reported uncertainty (Spearman)")"""),
-    ("md", "## 4. Main result: proposed RGA-Net vs the prior approaches (10 star-grouped splits)"),
-    ("code", """figure("08_comparison_table")
-table("comparison_table.csv", "All rows, window and star level (mean ± std over seeds)",
-      cols=["display_name", "role", "level", "seeds", "mcc", "roc_auc", "pr_auc", "kappa", "brier"])
-figure("09_prior_vs_proposed")
-table("prior_vs_proposed_paired.csv", "Paired per-seed differences RGA-Net − prior (MCC, AUPRC), Wilcoxon p",
-      query="metric in ['mcc', 'pr_auc']")
-figure("10_radar"); figure("13_confusion_grid")"""),
-    ("md", "## 5. Fix 1: observer features on classic models (our framework, not prior work)"),
-    ("code", """figure("11_observer_feature_dumbbell")
-table("observer_feature_gain.csv", "Without -> with observer features (MCC)", query="metric == 'mcc'")"""),
-    ("md", "## 6. RGA-Net: pre-training, chosen setting, ablation, learned λ"),
-    ("code", """table("rganet_pretraining.csv", "ZTF pre-training (hold-out by light curve)")
-table("rganet_grid.csv", "Validation grid (separate selection within each split)")
-figure("12_ablation")
-table("ablation_table.csv", "Ablation (mean ± std)", cols=["display_name", "level", "seeds", "mcc", "roc_auc", "pr_auc", "kappa", "brier"])
-table("ablation_paired.csv", "Ablation, paired over seeds (variant − full)", query="metric == 'mcc'")
+    ("md", "## Preprocessing"),
+    ("code", """for n in FIGURES_01: figure(n)
+figure("02_data_quality"); figure("03_cleaning_sankey"); figure("04_lightcurve_ak"); figure("05_ak_violin")
+table("ak_summary_by_type.csv", "A_k summary by observation type")
+figure("06_ak_validation"); figure("07_composition_sunburst")"""),
+    ("md", "## Model and comparison"),
+    ("code", """figure("08_comparison_table"); figure("09_prior_vs_proposed"); figure("10_radar")
+figure("11_observer_feature_dumbbell"); figure("12_ablation"); figure("13_confusion_grid")
 table("rganet_lambda.csv", "Learned gate strengths λ")
-d = table("ml_selected_params.csv", "ML models: chosen data setting and settings per seed")
-if d is not None: display(d.groupby(["variant", "model", "data_setting"]).size().rename("seeds").reset_index())"""),
-    ("md", "## 7. Distributed inference, scalability, K-Means (supporting)"),
-    ("code", """table("distributed_inference_check.csv", "Spark vs PyTorch probabilities")
-table("window_predictions_summary.csv", "Hive window_predictions per seed and set")
-table("scalability.csv", "Preprocessing + windowing through YARN (table only)")
-table("kmeans_silhouette.csv", "K-Means silhouette"); table("kmeans_crosstab_label.csv", "Cluster vs label")"""),
-    ("md", "## 8. COMPARISON.md, the appendix metrics, and the dashboard data"),
-    ("code", """text("COMPARISON.md", markdown=True)
-table("metrics_appendix.csv", "Appendix: precision, recall, accuracy, F1, balanced accuracy",
-      cols=["display_name", "level", "precision", "recall", "accuracy", "f1", "balanced_accuracy"])
-if os.path.isdir(DASH):
-    print("dashboard_data:", sorted(f for f in os.listdir(DASH) if f.endswith((".csv", ".parquet", ".md", ".yaml"))))
-text("DATA_DICTIONARY.md", f"{DASH}/DATA_DICTIONARY.md", markdown=True)"""),
+table("scalability.csv", "Scalability: YARN with 1, 2, 4 executors (table only; optional step)", optional=True)"""),
     ("code", f"""# End of the results. Lists anything that was expected but not found.
 print(f"{{len(SHOWN)}} result items shown from {{OUT}}")
 if MISSING:

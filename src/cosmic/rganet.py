@@ -46,6 +46,8 @@ from torch import nn
 from .evaluation import average_precision, roc_auc
 
 OBSERVER_TOKEN_FEATURES = ("a_k", "obs_offset")
+# same names as windows.OBSERVER_FEATURES; not imported, because windows.py needs PySpark and this step does not
+OBSERVER_SUMMARY_FEATURES = ("w_a", "n_observers", "mean_abs_offset")
 
 
 # ------------------------------------------------------------------ model
@@ -182,8 +184,7 @@ def kept_features(names, blind):
 
 def summary_cols(names, blind):
     """Summary features fed to the hybrid head (the observer-blind model gets the light-curve ones only)."""
-    from .windows import OBSERVER_FEATURES
-    return [i for i, n in enumerate(list(names)) if not (blind and n in OBSERVER_FEATURES)]
+    return [i for i, n in enumerate(list(names)) if not (blind and n in OBSERVER_SUMMARY_FEATURES)]
 
 
 def summary_inputs(summary, cols, med, mean, std):

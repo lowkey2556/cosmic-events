@@ -115,6 +115,16 @@ every step runs; they say nothing about Colab speed.
 
 ---
 
+### 2.2 Expected times for the new steps (estimates, not measured)
+
+Use these only for planning; `step_timings.csv` has the real times after a run. `ztf_ingest` took about 4.5 min on
+Colab (measured). `ztf_clean` is the big unknown: allow 1-2 hours for 841 M epochs on 2 cores, including the Drive
+copy. `ztf_label`: 30-60 min on the first run (VSX queries, then cached). `windows+ztf_windows+akval`: 15-30 min.
+`classify`: 30-60 min. `rganet` (8 grid points x 10 splits + 40 final runs, plus pre-training): 1-2 hours on a T4.
+`infer`, `compare`, `dashboard`, `report`: a few minutes each.
+
+---
+
 ## 3. What to check after each step
 
 | After | Look for |
@@ -126,7 +136,7 @@ every step runs; they say nothing about Colab speed.
 | `ztf_label` | `ztf_label_counts.csv`: labelled light curves per class, and how many were excluded near AAVSO stars |
 | `akval` | `ak_validation_summary.csv`: ρ, p, observers, matched points; below 10 observers it says "too few to conclude" |
 | `classify` | the "chosen data setting per model" table (`aavso` vs `aavso_ztf`, chosen on validation) |
-| `rganet` | `chosen on validation (seed 1): lr …, dropout …, hybrid head …`, then 40 runs with learned λ |
+| `rganet` | one `chosen on validation (seed N): lr …, dropout …, hybrid head …` line per split, then 40 runs with learned λ |
 | `infer` | `distributed_inference_check.csv`: max difference Spark vs PyTorch ≈ 1e-7 |
 | `report` | `13`+ figures written; `Not made (input missing)` lists anything skipped (never faked) |
 
@@ -175,6 +185,28 @@ cleaned ZTF copy, `work/`, `outputs/`).
    - [ ] RESULTS ends with `ALL RESULTS SHOWN`
    - [ ] slides call only the classic models **without** observer features "prior approaches" (Fix 1)
    - [ ] slides quote `COMPARISON.md` honestly, including where RGA-Net is not best or a p-value is large
+
+---
+
+## 6.1 What to say for each result
+
+Read the numbers from the generated "Inference:" caption under each item.
+
+| Item | Say |
+|---|---|
+| 1 Raw vs cleaned samples | The same observations before and after cleaning, and the columns we derive (mag_norm, A_k, offset). |
+| 2 Data quality | What cleaning removed for each dataset, and that sizes are reported honestly, with nothing duplicated or synthetic. |
+| 3 Sankey | Each grey branch is exactly what one cleaning rule removed. |
+| 4 Light curve by A_k | Every point is one observation; the colour shows how reliable its observer is. Brighter is up. |
+| 5 A_k violin | How observer agreement differs between CCD, Visual and DSLR observers. |
+| 6 A_k vs ZTF | An independent check: does higher A_k go with smaller scatter against a professional survey? Quote ρ and n, and say so if they are inconclusive. |
+| 7 Sunburst | Where the rows come from: source, then class, then VSX type. |
+| 8 Main comparison | MCC is the main metric because it uses the whole confusion matrix; the threshold comes from validation only. |
+| 9 Proposed vs prior | Prior approaches are classic models without observer features. Same splits, per-seed differences. Wilcoxon p-values are descriptive because splits overlap. |
+| 10 Radar | Outward is better on every axis; Brier is inverted, as labelled. |
+| 11 Dumbbell | What observer features add to classic models. Filled dots use our framework, so they are not prior work. |
+| 12 Ablation | What is lost when pre-training, the gate or observer information is removed. Error bars are seed spread. |
+| 13 Confusion matrices | The median-MCC seed is shown: neither the best nor the worst case. |
 
 ---
 

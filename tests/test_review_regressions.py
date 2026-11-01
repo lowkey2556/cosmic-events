@@ -173,3 +173,17 @@ def test_rganet_run_tunes_two_seeds_and_resumes_only_matching_checkpoints(tmp_pa
     (work / "models" / "rganet_full_seed1.pt").write_bytes(b"other model")
     with pytest.raises(AssertionError, match="unchanged completed run"):
         rganet.run(cfg, variants=["full", "no_pretrain"], seeds=[1, 2])
+
+
+def test_rganet_hybrid_columns_need_no_pyspark(monkeypatch):
+    import sys
+
+    from cosmic import rganet
+    from cosmic.windows import OBSERVER_FEATURES
+
+    assert list(rganet.OBSERVER_SUMMARY_FEATURES) == list(OBSERVER_FEATURES)
+    monkeypatch.setitem(sys.modules, "pyspark", None)
+    monkeypatch.setitem(sys.modules, "pyspark.sql", None)
+    monkeypatch.delitem(sys.modules, "cosmic.windows")
+    monkeypatch.delitem(sys.modules, "cosmic.spark_session")
+    assert rganet.summary_cols(["n_obs", "w_a"], True) == [0]
