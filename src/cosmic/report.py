@@ -35,9 +35,11 @@ V2_FILES = ["comparison_table_numeric.csv", "comparison_table_star_level.csv", "
 def retire_v2_outputs(out):
     """Move old v2 figures (outputs/fig_*.png|html|json) and old v2 tables into outputs/retired_v2/. Returns names."""
     moved = []
+    old = V2_FILES if os.path.exists(os.path.join(out, "scalability_v3.txt")) else \
+        V2_FILES + ["scalability.csv", "scalability_runs.csv"]
     for f in sorted(os.listdir(out)):
         p = os.path.join(out, f)
-        if os.path.isfile(p) and (f.startswith("fig_") or f in V2_FILES):
+        if os.path.isfile(p) and (f.startswith("fig_") or f in old):
             dst = os.path.join(out, "retired_v2")
             os.makedirs(dst, exist_ok=True)
             os.replace(p, os.path.join(dst, f))

@@ -70,6 +70,8 @@ def run(cfg, overrides=()):
     cores = cpu_cores()
     summ["machine_cpu_cores"] = cores
     summ.to_csv(os.path.join(out, "scalability.csv"), index=False)
+    with open(os.path.join(out, "scalability_v3.txt"), "w") as fh:  # report keeps only tables from this version
+        fh.write("measured by the v3 pipeline\n")
     print(f"\nMachine CPU cores: {cores}\n" + summ.round(2).to_string(index=False))
     short = summ[summ["executors_granted_min"] < summ["executors"]]
     if len(short):

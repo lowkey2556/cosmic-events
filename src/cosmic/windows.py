@@ -213,6 +213,11 @@ def window_sequences(spark, cfg, w_view="w_obs"):
         .applyInPandas(lambda d: build_sequence(d, L), schema=SEQ_SCHEMA)
 
 
+def unique_columns(seq):
+    """Keep the last copy of a repeated column: both joined tables have n_obs, and a repeat would shift the summary."""
+    return seq.loc[:, ~seq.columns.duplicated(keep="last")]
+
+
 def export_npz(spark, cfg, vb, vt, seq_table="window_sequences", feat_table="window_features",
                fname="windows_seq.npz"):
     """Token sequences + labels + per-window summary features -> V3_ROOT/work/<fname> (N x L x features)."""
@@ -220,6 +225,7 @@ def export_npz(spark, cfg, vb, vt, seq_table="window_sequences", feat_table="win
     seq = spark.sql(f"""SELECT s.*, f.auid, f.label, {summ} FROM {cfg.table(seq_table)} s
                         JOIN {cfg.table(feat_table)} f ON s.window_id = f.window_id
                         ORDER BY s.window_id""").toPandas()
+    seq = unique_columns(seq)
     path = os.path.join(cfg.work_dir, fname)
     n = save_window_npz(path, seq, int(cfg.section("windows")["seq_len"]))
     with open(os.path.join(cfg.work_dir, "vocab.json"), "w") as fh:

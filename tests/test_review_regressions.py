@@ -187,3 +187,24 @@ def test_rganet_hybrid_columns_need_no_pyspark(monkeypatch):
     monkeypatch.delitem(sys.modules, "cosmic.windows")
     monkeypatch.delitem(sys.modules, "cosmic.spark_session")
     assert rganet.summary_cols(["n_obs", "w_a"], True) == [0]
+
+
+def test_export_keeps_the_13_summary_features_aligned():
+    from cosmic.windows import SUMMARY, unique_columns
+
+    names = ["window_id", "n_obs"] + SUMMARY  # s.* then the features: n_obs twice, as in the export query
+    seq = pd.DataFrame([[0] * len(names)], columns=names)
+    seq.iloc[0, 1] = 999  # the sequence table's copy
+    out = unique_columns(seq)
+    assert out[SUMMARY].shape[1] == 13 and list(out[SUMMARY].columns) == SUMMARY
+    assert out["n_obs"].iloc[0] == 0
+
+
+def test_old_scalability_table_is_retired_unless_v3(tmp_path):
+    from cosmic.report import retire_v2_outputs
+
+    (tmp_path / "scalability.csv").write_text("x")
+    assert "scalability.csv" in retire_v2_outputs(str(tmp_path))
+    (tmp_path / "scalability.csv").write_text("x")
+    (tmp_path / "scalability_v3.txt").write_text("v3")
+    assert retire_v2_outputs(str(tmp_path)) == []
