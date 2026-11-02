@@ -154,43 +154,63 @@ def data_quality(dq):
 
 
 # ------------------------------------------------------------------ 3. Sankey of cleaning steps
+def _short_step(step):
+    """A few words for a cleaning step, so the Sankey labels stay readable."""
+    t = str(step).lower()
+    for key, name in (("dedup", "Repeated rows"), ("repeat", "Repeated epochs"), ("null", "Missing keys"),
+                      ("missing", "Invalid values"), ("comment", "Flagged comments"), ("fainter", "Upper limits"),
+                      ("detection", "Upper limits"), ("thin", "Night thinning"), ("band", "Small band groups"),
+                      ("quality", "Quality flags"), ("saturat", "Saturated"), ("light curve", "Short light curves"),
+                      ("filter", "Invalid filters")):
+        if key in t:
+            return name
+    return str(step).lstrip("0123456789 ")[:24]
+
+
+def _count(n):
+    n = float(n)
+    return f"{n / 1e6:.1f} M" if n >= 1e6 else f"{n / 1e3:.1f} k" if n >= 1e3 else f"{n:.0f}"
+
+
 def cleaning_sankey(steps_by_ds):
-    """steps_by_ds: {dataset: DataFrame(step, rows)} in order (first row = raw). Kept rows flow left to right; what
-    each step removes branches off to a grey 'removed by ...' node."""
-    labels, src, dst, val, colors, ncol = [], [], [], [], [], []
+    """steps_by_ds: {dataset: DataFrame(step, rows)} in order (first row = raw). One Sankey per dataset, because ZTF is
+    over 1,000 times larger than AAVSO: kept rows flow to the right, each removal branches off in grey. Steps that
+    removed nothing are left out."""
     st = _style()
-
-    def node(name, color):
-        labels.append(name)
-        ncol.append(color)
-        return len(labels) - 1
-
-    caps = []
-    for ds, d in steps_by_ds.items():
+    fig, caps = go.Figure(), []
+    n = len(steps_by_ds)
+    gap = 0.12
+    h = (1 - gap * (n - 1)) / n
+    for k, (ds, d) in enumerate(steps_by_ds.items()):
         d = d.reset_index(drop=True)
         base = st["sources"].get(ds, SERIES[0])
-        prev = node(f"{ds} raw: {_int(d.loc[0, 'rows'])}", base)
-        biggest = (None, 0)
+        r, g, b = (int(base[i:i + 2], 16) for i in (1, 3, 5))
+        labels, colors, src, dst, val, link = [f"Raw<br>{_count(d.loc[0, 'rows'])}"], [base], [], [], [], []
+        prev, kept_rows, biggest = 0, int(d.loc[0, "rows"]), (None, 0)
         for i in range(1, len(d)):
             rows, removed = int(d.loc[i, "rows"]), int(d.loc[i - 1, "rows"] - d.loc[i, "rows"])
-            name = str(d.loc[i, "step"]).lstrip("0123456789 ")
-            cur = node(f"{ds}: {name} ({_int(rows)})", base)
-            src.append(prev); dst.append(cur); val.append(rows); colors.append("rgba(42,120,214,0.30)"
-                                                                               if ds == "AAVSO" else "rgba(27,175,122,0.30)")
-            if removed > 0:
-                r = node(f"removed: {name} ({_int(removed)})", OTHER)
-                src.append(prev); dst.append(r); val.append(removed); colors.append("rgba(184,183,177,0.55)")
-                if removed > biggest[1]:
-                    biggest = (name, removed)
-            prev = cur
-        kept = d["rows"].iloc[-1] / d["rows"].iloc[0] * 100
-        caps.append(f"{ds} keeps {kept:.1f} % of its raw rows; the largest removal is '{biggest[0]}' "
-                    f"({_int(biggest[1])} rows)")
-    fig = go.Figure(go.Sankey(arrangement="snap", node=dict(label=labels, color=ncol, pad=14, thickness=16),
-                              link=dict(source=src, target=dst, value=val, color=colors)))
-    fig.update_layout(title="Cleaning steps: rows kept (coloured) and removed (grey) at each step")
-    return fig, "Inference: " + "; ".join(caps) + ". Link widths are row counts, so each grey branch is exactly " \
-                                                  "what one cleaning rule removed."
+            if removed <= 0:
+                continue
+            name = _short_step(d.loc[i, "step"])
+            labels += [f"Kept<br>{_count(rows)}", f"{name} -{_count(removed)}"]
+            colors += [base, OTHER]
+            cur, rem = len(labels) - 2, len(labels) - 1
+            src += [prev, prev]; dst += [cur, rem]; val += [rows, removed]
+            link += [f"rgba({r},{g},{b},0.30)", "rgba(184,183,177,0.55)"]
+            prev, kept_rows = cur, rows
+            if removed > biggest[1]:
+                biggest = (name, removed)
+        y0 = 1 - (k + 1) * h - k * gap
+        fig.add_trace(go.Sankey(arrangement="snap", domain=dict(x=[0, 1], y=[y0, y0 + h]),
+                                node=dict(label=labels, color=colors, pad=26, thickness=18),
+                                textfont=dict(size=14), link=dict(source=src, target=dst, value=val, color=link)))
+        fig.add_annotation(x=0, y=y0 + h + 0.015, xref="paper", yref="paper", xanchor="left", yanchor="bottom",
+                           showarrow=False, text=f"<b>{ds}</b>: {_int(d['rows'].iloc[0])} -> {_int(d['rows'].iloc[-1])} rows")
+        caps.append(f"{ds} keeps {d['rows'].iloc[-1] / d['rows'].iloc[0] * 100:.1f} % of its raw rows; the largest "
+                    f"removal is '{biggest[0]}' ({_int(biggest[1])} rows)")
+    fig.update_layout(title="Cleaning steps: rows kept (coloured) and removed (grey)", margin=dict(l=30, r=30, t=110, b=30))
+    return fig, "Inference: " + "; ".join(caps) + ". Link widths are row counts within each dataset, so each grey " \
+                                                  "branch is exactly what one cleaning rule removed."
 
 
 # ------------------------------------------------------------------ 4. light curve coloured by A_k
