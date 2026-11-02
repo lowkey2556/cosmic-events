@@ -182,23 +182,32 @@ def clean_run(spark, cfg):
                                        arrays_zip(hmjd, mag, magerr, clrcoeff, catflags) AS z0
                                 FROM {raw} WHERE filter IN ({filters}) AND objra IS NOT NULL AND objdec IS NOT NULL))))
         """).createOrReplaceTempView("zc_steps")
-    # pass 1: counts after every step (one scan; nothing is exploded)
-    c = spark.sql(f"""SELECT COUNT(*) AS lc0, SUM(size(z0)) AS e0, SUM(size(z1)) AS e1, SUM(size(z2)) AS e2,
-                             SUM(size(z3)) AS e3, SUM(size(z4)) AS e4,
-                             SUM(CASE WHEN size(z4) >= {min_ep} THEN 1 ELSE 0 END) AS lc5,
-                             SUM(CASE WHEN size(z4) >= {min_ep} THEN size(z4) ELSE 0 END) AS e5,
-                             COUNT(DISTINCT objectid) AS obj0
-                      FROM zc_steps""").first().asDict()
+    # One pass over the arrays: cleaned light curves and every step's counts are written together, so the expensive
+    # array filters run once. keep=1 is the cleaned table; keep=0 holds only the counts of too-short light curves.
+    loc = cfg.hdfs_uri(f"{cfg.hdfs_base}/ztf/clean")
+    stage = loc + "_stage"
+    spark.sql(f"""SELECT objectid, rcid, objra, objdec, size(z4) AS nepochs, size(z0) AS n0, size(z1) AS n1,
+                         size(z2) AS n2, size(z3) AS n3,
+                         IF(size(z4) >= {min_ep}, transform(z4, x -> x.hmjd), NULL) AS hmjd,
+                         IF(size(z4) >= {min_ep}, transform(z4, x -> x.mag), NULL) AS mag,
+                         IF(size(z4) >= {min_ep}, transform(z4, x -> x.magerr), NULL) AS magerr,
+                         IF(size(z4) >= {min_ep}, transform(z4, x -> x.clrcoeff), NULL) AS clrcoeff,
+                         IF(size(z4) >= {min_ep}, 1, 0) AS keep, field, filter
+                  FROM zc_steps""") \
+        .write.mode("overwrite").partitionBy("keep", "field", "filter").option("compression", "snappy").parquet(stage)
+    spark.read.parquet(stage).selectExpr("objectid", "keep", "n0", "n1", "n2", "n3", "nepochs") \
+        .createOrReplaceTempView("zc_counts")
+    c = spark.sql(f"""SELECT COUNT(*) AS lc0, SUM(n0) AS e0, SUM(n1) AS e1, SUM(n2) AS e2, SUM(n3) AS e3,
+                             SUM(nepochs) AS e4, SUM(keep) AS lc5, SUM(keep * nepochs) AS e5,
+                             COUNT(DISTINCT objectid) AS obj0 FROM zc_counts""").first().asDict()
     raw_all = spark.sql(f"SELECT COUNT(*) AS lc, SUM(nepochs) AS e FROM {raw}").first()
     t_count = time.time()
-    # pass 2: write the cleaned table (arrays only; catflags dropped because every kept epoch has catflags = 0)
-    loc = cfg.hdfs_uri(f"{cfg.hdfs_base}/ztf/clean")
-    spark.sql(f"""SELECT objectid, rcid, objra, objdec, size(z4) AS nepochs,
-                         transform(z4, x -> x.hmjd) AS hmjd, transform(z4, x -> x.mag) AS mag,
-                         transform(z4, x -> x.magerr) AS magerr, transform(z4, x -> x.clrcoeff) AS clrcoeff,
-                         field, filter
-                  FROM zc_steps WHERE size(z4) >= {min_ep}""") \
-        .write.mode("overwrite").partitionBy("field", "filter").option("compression", "snappy").parquet(loc)
+    jvm, fs = _fs(spark, cfg)
+    Path = jvm.org.apache.hadoop.fs.Path
+    fs.delete(Path(loc), True)
+    if not fs.rename(Path(f"{stage}/keep=1"), Path(loc)):
+        raise RuntimeError(f"could not move the cleaned files to {loc}")
+    fs.delete(Path(stage), True)
     _register_clean(spark, cfg, loc)
     t_clean = cfg.table("ztf_lightcurves_clean")
     size, raw_size = path_bytes(spark, loc), path_bytes(spark, cfg.hdfs_uri(f"{cfg.hdfs_base}/ztf/raw"))
