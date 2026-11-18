@@ -1,0 +1,15 @@
+dataset,step_order,step,rows,removed
+AAVSO,0,0 raw rows,637966,0
+AAVSO,1,1 after deduplication,614277,23689
+AAVSO,2,2 after dropping null keys,614254,23
+AAVSO,3,3 after dropping comment codes BUWLZIS,604013,10241
+AAVSO,4,4 detections (fainter-than split out),599992,4021
+AAVSO,5,5 after thinning dense time series (<= 10 per observer per night),189523,410469
+AAVSO,6,6 after band normalisation (groups >= 20; main bands >= 5),188914,609
+ZTF,0,0 raw epochs (all filters),840991347,0
+ZTF,1,"1 valid filters (zg, zr, zi) and positions",840991347,0
+ZTF,2,2 missing or invalid magnitude/error removed,840991347,0
+ZTF,3,3 quality flags (catflags != 0) removed,784667145,56324202
+ZTF,4,4 saturated epochs (mag <= 12.5) removed,784411052,256093
+ZTF,5,5 exact repeated epochs removed,784411052,0
+ZTF,6,6 light curves with < 20 good epochs dropped,776003390,8407662
